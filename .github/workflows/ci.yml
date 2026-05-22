@@ -35,7 +35,7 @@ jobs:
       - uses: j178/prek-action@v2
 
       - name: Run Pylint
-        run: 
+        run:
           uv pip install --system --no-deps . && uvx nox -s pylint --no-install
           -- --output-format=github
 
