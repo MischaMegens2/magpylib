@@ -34,10 +34,11 @@ jobs:
 
       - uses: j178/prek-action@v2
 
-      - name: Run Pylint
-        run:
-          uv pip install --system --no-deps . && uvx nox -s pylint --no-install
-          -- --output-format=github
+      - name: Pre-install core library snapshot
+        run: uv pip install --system --no-deps .
+
+      - name: Run Pylint via Nox
+        run: uvx nox -s pylint --no-install -- --output-format=github
 
   checks:
     name: Check Python ${{ matrix.python-version }} on ${{ matrix.runs-on }}
