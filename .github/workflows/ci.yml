@@ -16,6 +16,8 @@ env:
   # Set it to 3 to support 8-bit color graphics (256 colors per channel)
   # for libraries that care about the value set.
   FORCE_COLOR: 3
+  # Tell UV to globally ignore the looping docs package configuration
+  UV_NO_GROUP: "docs"
 
 jobs:
   lint:
@@ -35,7 +37,7 @@ jobs:
       - uses: j178/prek-action@v2
 
       - name: Run Pylint
-        run: uvx nox -s pylint -- --output-format=github
+        run: uvx --env UV_NO_GROUP=docs nox -s pylint -- --output-format=github
 
   checks:
     name: Check Python ${{ matrix.python-version }} on ${{ matrix.runs-on }}
@@ -73,8 +75,8 @@ jobs:
 
       - name: Install package
         run: |
-          uv pip install . --no-deps
-          uv sync --no-group docs
+          uv pip install --system --no-deps
+          uv sync
 
       - name: Test package
         run: >-
