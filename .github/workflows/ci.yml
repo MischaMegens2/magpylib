@@ -72,7 +72,7 @@ jobs:
       - uses: astral-sh/setup-uv@v7
 
       - name: Install package
-        run: uv sync
+        run: uv sync --no-group docs
 
       - name: Test package
         run: >-
