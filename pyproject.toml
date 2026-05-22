@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 
 [project]
-name = "magpylib"
+name = "magpylib-fork"
 authors = [
   { name = "Michael Ortner", email = "magpylib@gmail.com" },
 ]
