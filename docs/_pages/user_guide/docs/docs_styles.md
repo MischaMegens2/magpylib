@@ -253,11 +253,15 @@ magpy.defaults.display.style.as_dict(flatten=True, separator=".")
 (examples-own-3d-models)=
 ## Custom 3D Models
 
+:::{versionchanged} 6.0
+`style.model3d.data` is a tuple; add traces with `add_trace()`.
+:::
+
 Each Magpylib object has a default 3D representation that is displayed with `show()`. It is possible to disable the default model and to provide Magpylib with a custom model.
 
 There are several reasons why this can be of interest. For example,  the integration of a [custom source](guide-docs-classes-custom-source) object that has its own geometry, to display a sensor in the form of a realistic package provided in CAD form, representation of a [Collection](guide-docs-classes-collections) as a parts holder, integration of environmental parts to the Magpylib 3D plotting scene, or simply highlighting an object when colors do not suffice.
 
-The default trace of a Magpylib object `obj` can simply be turned off using the individual style command `obj.style.model3d.showdefault = False`. A custom 3D model can be added using the function `obj.style.model3d.add_trace()`. The new trace is then stored in the `obj.style.model3d.data` property. This property is a list and it is possible to store multiple custom traces there. The default style is not included in this property. It is instead inherently stored in the Magpylib classes to enable visualization of the magnetization with a color scheme.
+The default trace of a Magpylib object `obj` can simply be turned off using the individual style command `obj.style.model3d.showdefault = False`. A custom 3D model can be added using the function `obj.style.model3d.add_trace()`. The new trace is then stored in the `obj.style.model3d.data` property, which holds a tuple, so it can store multiple custom traces. Being a tuple, it only ever changes as a whole: assign a new sequence to replace the traces (`obj.style.model3d.data = []` drops them all) rather than mutating what the property returns. The default style is not included in this property. It is instead inherently stored in the Magpylib classes to enable visualization of the magnetization with a color scheme.
 
 The input of `add_trace()` must be a `magpylib.graphics.Trace3d` object, or a dictionary that contains all necessary information for generating a 3D model. Because different plotting libraries require different directives, traces might be bound to specific [backends](guide-graphic-backends). For example, a trace dictionary might contain all information for Matplotlib to generate a 3D model using the [plot_surface](https://matplotlib.org/stable/plot_types/3D/surface3d_simple.html) function.
 
@@ -265,11 +269,11 @@ To enable visualization of custom objects with different graphic backends Magpyl
 
 A trace-dictionary has the following keys:
 
-1. `'backend'`: `'generic'`, `'matplotlib'` or `'plotly'`
+1. `'backend'`: `'generic'`, or the name of a registered backend such as `'matplotlib'` or `'plotly'`. A trace for a specific backend is shown only by that backend, and only if it draws such traces: Pyvista does not, see [](guide-graphics-custom-backend-native).
 2. `'constructor'`: name of the plotting constructor from the respective backend, e.g. plotly `'Mesh3d'` or Matplotlib `'plot_surface'`
 3. `'args'`: default `None`, positional arguments handed to constructor
 4. `'kwargs'`: default `None`, keyword arguments handed to constructor
-5. `'coordsargs'`: tells Magpylib which input corresponds to which coordinate direction, so that geometric representation becomes possible. By default `{'x': 'x', 'y': 'y', 'z': 'z'}` for the `'generic'` backend and Plotly backend,  and `{'x': 'args[0]', 'y': 'args[1]', 'z': 'args[2]'}` for the Matplotlib backend.
+5. `'coordsargs'`: tells Magpylib which input corresponds to which coordinate direction, so that geometric representation becomes possible. By default `{'x': 'args[0]', 'y': 'args[1]', 'z': 'args[2]'}` when the trace has positional `args` and its `kwargs` do not name all of `x`, `y` and `z`, as for Matplotlib's `plot(xs, ys, zs)`, and `{'x': 'x', 'y': 'y', 'z': 'z'}` otherwise.
 6. `'show'`: default `True`, toggle if this trace should be displayed
 7. `'scale'`: default 1, object geometric scaling factor
 8. `'updatefunc'`: default `None`, updates the trace parameters when `show()` is called. Used to generate dynamic traces.

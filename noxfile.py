@@ -37,9 +37,11 @@ def pylint(session: nox.Session) -> None:
     """
     Run Pylint.
     """
-    # This needs to be installed into the package environment, and is slower
-    # than a pre-commit check
-    session.install("--group", "dev", "-e", ".", "pylint>=3.2")
+    # pylint and astroid are pinned in the `lint` group: a release of either
+    # changes what is reported, and should land as a bump of that pin rather
+    # than as a red check on an unrelated PR. This needs the package
+    # environment, and is slower than a pre-commit check.
+    session.install("--group", "dev", "--group", "lint", "-e", ".")
     session.run("pylint", "magpylib", *session.posargs)
 
 
@@ -51,6 +53,16 @@ def tests(session: nox.Session) -> None:
     test_deps = nox.project.dependency_groups(PROJECT, "test")
     session.install("-e.", *test_deps)
     session.run("pytest", *session.posargs)
+
+
+@nox.session
+def doctests(session: nox.Session) -> None:
+    """
+    Run docstring examples under src/magpylib.
+    """
+    test_deps = nox.project.dependency_groups(PROJECT, "test")
+    session.install("-e.", *test_deps)
+    session.run("pytest", "--doctest-modules", "src/magpylib", *session.posargs)
 
 
 @nox.session(reuse_venv=True, default=False)
@@ -73,6 +85,9 @@ def docs(session: nox.Session) -> None:
     shared_args = (
         "-n",  # nitpicky mode
         "-T",  # full tracebacks
+        # execute the notebooks in parallel - they are read, and so run, by one
+        # forked worker per core. conf.py evens out how they are shared.
+        "-j=auto",
         f"-b={args.builder}",
         "docs",
         args.output or f"docs/_build/{args.builder}",

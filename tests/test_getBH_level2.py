@@ -1,11 +1,17 @@
+import threading
+import time
 import unittest
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pytest
+from scipy.spatial.transform import Rotation as R
 
 import magpylib as magpy
 from magpylib._src.exceptions import MagpylibBadUserInput
+from magpylib._src.fields import chunks, field_BH
+from magpylib._src.obj_classes.class_BaseGeo import BaseGeo
 
 
 def test_getB_level2_input_simple():
@@ -160,6 +166,43 @@ def test_getB_level2_input_path():
     B = magpy.getB([pm1, pm1], [sens2, sens2])
     result = np.array([fb, fb])
     np.testing.assert_allclose(B, result)
+
+
+def test_getBH_level2_mixed_property_path_lengths():
+    """Object whose position reaches max_path_len but whose other path
+    properties are stored minimally (len 1) must still be field-correct and
+    keep its minimal form.
+
+    Such an object has _get_path_len() == max_path_len, yet dimension and
+    polarization are shorter and must repeat their last entry.
+    """
+    # position path length 3; dimension & polarization stored minimally (len 1)
+    src = magpy.magnet.Cuboid(polarization=(0, 0, 1), dimension=(1, 1, 1))
+    src.position = [(0, 0, 0), (0, 0, 1), (0, 0, 2)]
+    # static second source to also exercise the shorter-than-max branch
+    src2 = magpy.magnet.Cuboid(polarization=(0, 0, 1), dimension=(1, 1, 1))
+
+    assert len(src._position) == 3
+    assert len(src._dimension) == 1
+    assert len(src._polarization) == 1
+
+    B = magpy.getB([src, src2], (0, 0, 5))
+    assert B.shape == (2, 3, 3)  # (sources, path, xyz)
+
+    # paths keep their minimal stored form
+    assert len(src._position) == 3
+    assert len(src._dimension) == 1
+    assert len(src._polarization) == 1
+    assert len(src2._position) == 1
+    assert len(src2._dimension) == 1
+
+    # correctness: each path step matches the equivalent static computation
+    for i, z in enumerate([0, 1, 2]):
+        ref = magpy.magnet.Cuboid(
+            polarization=(0, 0, 1), dimension=(1, 1, 1), position=(0, 0, z)
+        )
+        np.testing.assert_allclose(B[0, i], magpy.getB(ref, (0, 0, 5)))
+        np.testing.assert_allclose(B[1, i], magpy.getB(src2, (0, 0, 5)))
 
 
 def test_path_tile():
@@ -607,3 +650,415 @@ def test_do_not_warn():
         do_not_warnme2()
         if len(w) > 0:
             pytest.fail("WARNING SHOULD NOT HAVE BEEN RAISED")
+
+
+def test_path_varying_property_multi_pixel():
+    """Path-varying property values must pair with the correct path step for
+    every sensor pixel.
+
+    Regression test: _tile_group_property_path laid out path-varying
+    properties pixel-major/path-minor (np.tile) while positions and observers
+    are path-major/pixel-minor, silently scrambling fields across path steps.
+    """
+    pixel = [(0, 0, 0.1), (0, 0, 0.2)]
+    sens = magpy.Sensor(pixel=pixel)
+
+    # scalar property (current)
+    currents = [1.0, 2.0, 3.0]
+    circ = magpy.current.Circle(current=currents, diameter=1.0)
+    B = magpy.getB(circ, sens)
+    for i, curr in enumerate(currents):
+        B_ref = magpy.current.Circle(current=curr, diameter=1.0).getB(pixel)
+        np.testing.assert_allclose(B[i], B_ref)
+
+    # vector property (dimension)
+    dims = [(1, 1, 1), (2, 2, 2)]
+    cub = magpy.magnet.Cuboid(polarization=(0, 0, 1), dimension=dims)
+    B = magpy.getB(cub, sens)
+    for i, dim in enumerate(dims):
+        B_ref = magpy.magnet.Cuboid(polarization=(0, 0, 1), dimension=dim).getB(pixel)
+        np.testing.assert_allclose(B[i], B_ref)
+
+
+def test_path_varying_property_multi_pixel_ragged_group():
+    """Same as above for sources with unequal property shapes in one group
+    (object-dtype branch of _tile_group_property_path)."""
+    pixel = [(0.1, 0, 0.2), (0, 0.2, 0.3)]
+    sens = magpy.Sensor(pixel=pixel)
+
+    verts1 = np.array([[(-1, 0, 0), (1, 0, 0)], [(-1, 0, 0.5), (1, 0, 0.5)]])
+    verts2 = np.array([(0, -1, 0), (0, 1, 0), (0, 1, 1)])
+    p1 = magpy.current.Polyline(current=1, vertices=verts1)  # path-varying
+    p2 = magpy.current.Polyline(current=1, vertices=verts2)  # static
+
+    B = magpy.getB([p1, p2], sens)
+    for i in range(2):
+        B_ref1 = magpy.current.Polyline(current=1, vertices=verts1[i]).getB(pixel)
+        B_ref2 = magpy.current.Polyline(current=1, vertices=verts2).getB(pixel)
+        np.testing.assert_allclose(B[0, i], B_ref1)
+        np.testing.assert_allclose(B[1, i], B_ref2)
+
+
+def _cuboid_on_a_path():
+    return magpy.magnet.Cuboid(
+        dimension=(1, 1, 1), polarization=(0, 0, 1), position=[(0, 0, 2), (0, 0, 3)]
+    )
+
+
+UNCHANGED_SOURCES = {
+    "cuboid on a path": _cuboid_on_a_path,
+    "polyline on a path": lambda: magpy.current.Polyline(
+        current=1,
+        vertices=[(0, 0, 0), (1, 0, 0), (1, 1, 0)],
+        position=[(0, 0, 2), (0, 0, 3), (0, 0, 4)],
+    ),
+    "collection, a child on a path": lambda: magpy.Collection(
+        _cuboid_on_a_path(), magpy.misc.Dipole(moment=(0, 0, 1), position=(2, 0, 2))
+    ),
+}
+
+
+@pytest.mark.parametrize("func", ["getB", "getFT"])
+@pytest.mark.parametrize("name", UNCHANGED_SOURCES)
+def test_objects_stay_unchanged_while_computing(name, func, monkeypatch):
+    """getB and getFT write nothing to the objects, so threads can compute with
+    the same object at the same time (#1074): no attribute is set during the
+    call, and every stored path property is the same array afterwards."""
+    source = UNCHANGED_SOURCES[name]()
+    if func == "getB":
+        observer = magpy.Sensor(
+            position=[(0.1, 0, 0), (0.2, 0, 0)],
+            orientation=R.from_rotvec([(0, 0, 0.3), (0, 0, 0.6)]),
+            pixel=[(0, 0, 0)] * 2,
+        )
+    else:
+        observer = magpy.magnet.Cuboid(
+            dimension=(0.1, 0.1, 0.1), polarization=(0, 0, 1), position=[(0, 0, 0)] * 2
+        )
+    objs = [source, observer, *getattr(source, "children_all", [])]
+    for obj in objs:
+        _ = obj.style  # created on first access
+
+    def stored(obj):
+        return {p: getattr(obj, f"_{p}") for p in obj._path_properties}
+
+    def values(obj):
+        return {
+            p: np.copy(v.as_quat() if isinstance(v, R) else v)
+            for p, v in stored(obj).items()
+        }
+
+    before = [(stored(obj), values(obj)) for obj in objs]
+    watched, writes = {id(o) for o in objs}, []
+
+    def record(self, attr, value):
+        if id(self) in watched:
+            writes.append((type(self).__name__, attr))
+        object.__setattr__(self, attr, value)
+
+    monkeypatch.setattr(BaseGeo, "__setattr__", record)
+    if func == "getB":
+        magpy.getB(source, observer)
+    else:
+        magpy.getFT(source, observer, meshing=8)
+
+    assert writes == []
+    for obj, (arrays, vals) in zip(objs, before, strict=True):
+        assert all(stored(obj)[p] is arr for p, arr in arrays.items())
+        for prop, val in values(obj).items():
+            np.testing.assert_array_equal(val, vals[prop])
+
+
+@pytest.mark.parametrize("func", [magpy.getB, magpy.getH, magpy.getJ, magpy.getM])
+def test_string_sources_are_rejected(func):
+    """The v5 functional call ``getB("Cuboid", ...)`` was removed in v6; the
+    error must not offer a string as a valid source."""
+    with pytest.raises(MagpylibBadUserInput, match="received 'Cuboid'") as err:
+        func("Cuboid", (0, 0, 1))
+    assert "string" not in str(err.value).split("received")[0]
+
+
+@pytest.mark.parametrize("func", [magpy.getB, magpy.getH, magpy.getJ, magpy.getM])
+def test_unknown_keyword_raises(func):
+    """Keywords that only fed the removed functional call are no longer
+    swallowed silently."""
+    src = magpy.magnet.Cuboid(dimension=(1, 1, 1), polarization=(0, 0, 1))
+    with pytest.raises(TypeError, match="sum_up"):
+        func(src, (0, 0, 1), sum_up=True)
+
+
+PIXEL = np.random.default_rng(3).normal(size=(4, 5, 3))
+ANGLES = np.linspace(0, 330, 12)
+PATH_SENSORS = {
+    "no pixel, path": lambda: magpy.Sensor(position=[(0, 0, 0), (1, 2, 3)]),
+    "unrotated": lambda: magpy.Sensor(pixel=PIXEL, position=(0.1, 0.2, 0.3)),
+    "rotated, translation path": lambda: magpy.Sensor(
+        pixel=PIXEL,
+        position=np.linspace((0, 0, 0), (1, 2, 3), 7),
+        orientation=R.from_rotvec((0.3, -0.2, 0.9)),
+    ),
+    "rotating along a path": lambda: magpy.Sensor(pixel=PIXEL).rotate_from_angax(
+        ANGLES, (1, 2, 3), anchor=(0.5, 0, 0)
+    ),
+    "rotating, left-handed": lambda: magpy.Sensor(
+        pixel=PIXEL, handedness="left"
+    ).rotate_from_angax(ANGLES, "z", anchor=(0, 0.5, 0)),
+}
+
+
+@pytest.mark.parametrize("name", PATH_SENSORS)
+def test_sensor_on_a_path_reads_each_step_by_hand(name):
+    """At each path step a sensor reads the field at its pixels, placed by that
+    step's position and orientation, in its own frame. The source moves on a
+    longer path, along which the sensor keeps its last pose."""
+    sens = PATH_SENSORS[name]()
+    n_sens = len(sens._position)
+    src = magpy.magnet.Cuboid(
+        dimension=(1, 1, 1),
+        polarization=(0.1, 0.2, 1.0),
+        position=np.linspace((0, 0, -2), (0.3, 0.1, -2.5), n_sens + 2),
+    )
+    B = src.getB(sens, squeeze=False).reshape(n_sens + 2, -1, 3)
+
+    pixel = np.zeros((1, 3)) if sens.pixel is None else sens.pixel.reshape(-1, 3)
+    for step, src_pos in enumerate(src._position):
+        last = min(step, n_sens - 1)  # the sensor stays at its last pose
+        pos, rot = sens._position[last], sens._orientation[last]
+        static = magpy.magnet.Cuboid(
+            dimension=(1, 1, 1), polarization=(0.1, 0.2, 1.0), position=src_pos
+        )
+        B_global = static.getB(rot.apply(pixel) + pos, squeeze=False).reshape(-1, 3)
+        B_step = rot.inv().apply(B_global)
+        if sens.handedness == "left":
+            B_step[:, 0] *= -1
+        np.testing.assert_allclose(B[step], B_step, rtol=1e-12, atol=1e-15)
+
+
+POL = (0.1, 0.2, 1.0)
+CHUNK_SOURCES = {
+    "cuboids, one on a path": lambda: [
+        magpy.magnet.Cuboid(dimension=(1, 1, 1), polarization=POL),
+        magpy.magnet.Cuboid(
+            dimension=(1, 2, 1),
+            polarization=POL,
+            position=[(0, 0, 0), (0.1, 0, 0), (0.2, 0, 0)],
+            orientation=R.from_euler("x", 20, degrees=True),
+        ),
+    ],
+    "sphere": lambda: magpy.magnet.Sphere(diameter=1, polarization=POL),
+    "five spheres": lambda: [
+        magpy.magnet.Sphere(diameter=1, polarization=POL, position=(i, 0, -2))
+        for i in range(5)
+    ],
+    "tetrahedron": lambda: magpy.magnet.Tetrahedron(
+        vertices=[(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)], polarization=POL
+    ),
+    "triangular mesh": lambda: magpy.magnet.TriangularMesh.from_ConvexHull(
+        points=np.random.default_rng(1).normal(size=(10, 3)), polarization=POL
+    ),
+    "cylinder segment": lambda: magpy.magnet.CylinderSegment(
+        dimension=(0.5, 1, 1, 0, 90), polarization=POL
+    ),
+    "circle": lambda: magpy.current.Circle(diameter=1, current=1),
+    "polylines, ragged": lambda: [
+        magpy.current.Polyline(
+            vertices=[(0, 0, -1), (1, 0, -1), (1, 1, -1)], current=1
+        ),
+        magpy.current.Polyline(
+            vertices=[(0, 0, -2), (1, 0, -2), (1, 1, -2), (0, 1, -2), (0, 0, -2)],
+            current=2,
+        ),
+    ],
+    "triangle strip": lambda: magpy.current.TriangleStrip(
+        vertices=[(0, 0, -1), (1, 0, -1), (0, 1, -1), (1, 1, -1), (0, 2, -1)], current=1
+    ),
+    "triangle sheet": lambda: magpy.current.TriangleSheet(
+        current_densities=[(1, 0, 0), (0, 1, 0)],
+        vertices=[(0, 0, -1), (1, 0, -1), (0, 1, -1), (1, 1, -1)],
+        faces=[(0, 1, 2), (1, 3, 2)],
+    ),
+    "dipole and triangle": lambda: [
+        magpy.misc.Dipole(moment=POL, position=(0, 0, -1)),
+        magpy.misc.Triangle(
+            vertices=[(0, 0, -1), (1, 0, -1), (0, 1, -1)], polarization=POL
+        ),
+    ],
+    "custom source and cuboid": lambda: [
+        magpy.misc.CustomSource(
+            field_func=lambda field, observers: (
+                observers * (2.0 if field == "B" else 3.0)
+            )
+        ),
+        magpy.magnet.Cuboid(dimension=(1, 1, 1), polarization=POL),
+    ],
+    "collections on paths": lambda: [
+        magpy.Collection(
+            magpy.magnet.Cuboid(dimension=(1, 1, 1), polarization=POL),
+            magpy.Collection(
+                magpy.magnet.Sphere(diameter=1, polarization=POL, position=(0, 1, 0)),
+                magpy.current.Circle(diameter=1, current=1, position=(1, 0, 0)),
+            ),
+        ).move([(0, 0, -1), (0, 0.1, -1.1), (0.1, 0, -1.2)], start=0),
+        magpy.misc.Dipole(moment=POL, position=(0, 0, -2)),
+    ],
+}
+
+
+@pytest.mark.parametrize("name", CHUNK_SOURCES)
+def test_chunks_and_threads_match_one_vectorized_step(name, monkeypatch):
+    """Computations above CHUNK_ROWS run in chunks, on threads, and Collections
+    in blocks of sources: the field is the one-step field, and the same for
+    any thread count."""
+    sources = CHUNK_SOURCES[name]()
+    grid = np.linspace(-1, 1, 4)
+    pixel = np.array([[(x, y, 0.3) for y in np.linspace(-1, 1, 5)] for x in grid])
+    sensors = [
+        magpy.Sensor(pixel=pixel, position=[(0, 0, 0), (0, 0.1, 0.2), (0.3, 0, 0.1)]),
+        magpy.Sensor(pixel=pixel, orientation=R.from_euler("z", 30, degrees=True)),
+    ]
+    B_one_step = magpy.getB(sources, sensors)
+    atol = 1e-13 * np.nanmax(np.abs(B_one_step))
+
+    for chunk_rows in (2, 7, 300):  # path steps, pixels, or whole sources packed
+        monkeypatch.setattr(chunks, "CHUNK_ROWS", chunk_rows)
+        B_chunks = []
+        for threads in (1, 4):
+            monkeypatch.setattr(magpy.defaults, "threads", threads)
+            B_chunks.append(magpy.getB(sources, sensors))
+        np.testing.assert_array_equal(B_chunks[0], B_chunks[1])
+        np.testing.assert_allclose(B_chunks[0], B_one_step, rtol=1e-12, atol=atol)
+
+
+def test_user_field_func_gets_all_observers_on_the_calling_thread(monkeypatch):
+    """A user field_func is called once with all observers, on the calling
+    thread, also in a Collection computed in blocks of sources: it may not
+    be thread-safe, nor compute point by point."""
+    calls = []
+
+    def field_func(field, observers):  # noqa: ARG001
+        calls.append((threading.get_ident(), len(observers)))
+        return observers
+
+    monkeypatch.setattr(chunks, "CHUNK_ROWS", 7)
+    monkeypatch.setattr(field_BH, "_BLOCK_CHUNKS_PER_THREAD", 1)  # a source a block
+    src = magpy.misc.CustomSource(field_func=field_func)
+    points = np.random.default_rng(0).random((50, 3))
+    calls.clear()  # the constructor tries field_func on two points
+    src.getB(points)
+    col = magpy.Collection(src, magpy.misc.Dipole(moment=(0, 0, 1)))
+    col.move([(0, 0, 1)] * 4)  # a 5-step path
+    col.getB(points)
+
+    assert calls == [(threading.get_ident(), 50), (threading.get_ident(), 250)]
+
+
+@pytest.mark.parametrize(
+    ("rows_per_obs", "n_path", "n_pix"),
+    [
+        ([1] * 5, 1, 30_000),  # sources packed, then pixel slices
+        ([17_000], 100, 10),  # a mesh on a long path: path slices
+        ([1, 60_000, 3], 1, 2),  # a source above CHUNK_ROWS for one pixel
+    ],
+)
+def test_chunks_cover_every_row_once_within_chunk_rows(rows_per_obs, n_path, n_pix):
+    """Chunks hold at most CHUNK_ROWS kernel rows, or one source at one path
+    step and pixel, and cover every row once."""
+    covered = np.zeros((len(rows_per_obs), n_path, n_pix), dtype=int)
+    for src_sl, path_sl, pix_sl in field_BH._chunk_slices(rows_per_obs, n_path, n_pix):
+        covered[src_sl, path_sl, pix_sl] += 1
+        rows = (
+            sum(rows_per_obs[src_sl])
+            * len(range(n_path)[path_sl])
+            * len(range(n_pix)[pix_sl])
+        )
+        assert rows <= max(chunks.CHUNK_ROWS, *rows_per_obs[src_sl])
+    assert np.all(covered == 1)
+
+
+def test_threads_keep_the_callers_numpy_error_settings(monkeypatch):
+    """np.errstate applies to chunks computed on other threads too, a callback
+    included."""
+    monkeypatch.setattr(chunks, "CHUNK_ROWS", 7)
+    monkeypatch.setattr(magpy.defaults, "threads", 4)
+    sphere = magpy.magnet.Sphere(diameter=1, polarization=POL)
+    observers = np.full((50, 3), 1e120)
+    with np.errstate(all="raise"), pytest.raises(FloatingPointError):
+        sphere.getB(observers)
+    calls = []
+    with np.errstate(all="call", call=lambda *args: calls.append(args)):
+        sphere.getB(observers)
+    assert calls
+
+
+@pytest.mark.parametrize(
+    ("source", "pool_sizes"),
+    [
+        (lambda: magpy.magnet.Cuboid(dimension=(1, 1, 1), polarization=POL), [4]),
+        # 12 faces: one observer is a 12-row chunk, above CHUNK_ROWS = 7
+        (
+            lambda: magpy.magnet.TriangularMesh.from_ConvexHull(
+                points=[(x, y, z) for x in (0, 1) for y in (0, 1) for z in (0, 1)],
+                polarization=POL,
+            ),
+            [2],
+        ),
+    ],
+)
+def test_chunks_run_on_threads(source, pool_sizes, monkeypatch):
+    """Chunks run on defaults.threads threads, and on fewer when one observer
+    of a source is above CHUNK_ROWS, so that memory stays near threads times
+    CHUNK_ROWS rows."""
+    sizes = []
+
+    class Recording(ThreadPoolExecutor):
+        def __init__(self, max_workers):
+            sizes.append(max_workers)
+            super().__init__(max_workers)
+
+    monkeypatch.setattr(chunks, "ThreadPoolExecutor", Recording)
+    monkeypatch.setattr(chunks, "CHUNK_ROWS", 7)
+    monkeypatch.setattr(magpy.defaults, "threads", 4)
+    magpy.getB(source(), np.random.default_rng(0).normal(size=(50, 3)) * 3)
+    assert sizes == pool_sizes
+
+
+def test_an_error_in_a_chunk_drops_the_queued_chunks(monkeypatch):
+    """The first error, or Ctrl+C, cancels the queued chunks: the threads only
+    finish the chunks they hold before it is raised."""
+
+    def fail(chunk):  # noqa: ARG001
+        msg = "chunk failed"
+        raise ValueError(msg)
+
+    done = []
+
+    def slow(chunk):
+        time.sleep(0.01)
+        done.append(chunk)
+
+    monkeypatch.setattr(magpy.defaults, "threads", 2)
+    tasks = [(fail, 0)] + [(slow, i) for i in range(1, 101)]
+    with pytest.raises(ValueError, match="chunk failed"):
+        chunks.run_chunks(tasks, rows=10**6)
+    assert len(done) < 10
+
+
+@pytest.mark.parametrize("started", [0, 2])
+def test_chunks_no_thread_takes_run_on_the_calling_thread(started, monkeypatch):
+    """At interpreter shutdown, or where threads cannot start, the chunks no
+    thread took run on the calling thread, each chunk once."""
+    submitted = []
+
+    class Refusing(ThreadPoolExecutor):
+        def submit(self, fn, /, *args, **kwargs):
+            if len(submitted) == started:
+                msg = "cannot schedule new futures after interpreter shutdown"
+                raise RuntimeError(msg)
+            submitted.append(fn)
+            return super().submit(fn, *args, **kwargs)
+
+    monkeypatch.setattr(chunks, "ThreadPoolExecutor", Refusing)
+    monkeypatch.setattr(magpy.defaults, "threads", 4)
+    ran = []
+    chunks.run_chunks([(ran.append, i) for i in range(10)], rows=10**6)
+    assert sorted(ran) == list(range(10))

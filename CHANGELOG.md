@@ -1,5 +1,203 @@
 # Changelog
 
+## [6.2.0] 2026-11-06
+
+### Added
+
+- An Agent Skill ships inside the package, so AI coding assistants write current
+  Magpylib code (SI units, `polarization`, `getFT(..., meshing=...)`); add it to
+  a project with `uvx library-skills`
+  ([#992](https://github.com/magpylib/magpylib/pull/992)).
+
+### Fixed
+
+- `magpy.func` raises a `TypeError` on values with units instead of dropping
+  them, which read a pint or astropy length of 10 mm as 10 m
+  ([#1071](https://github.com/magpylib/magpylib/pull/1071)).
+- Threads can share objects on paths: `getB` could fail and `getFT` gave wrong
+  forces. `getFT` along source paths is several times faster, and sources inside
+  Collections follow their own paths
+  ([#1075](https://github.com/magpylib/magpylib/pull/1075)).
+
+## [6.1.0] 2026-10-31
+
+### Added
+
+- A display backend can draw sensor pixels itself: with `draws_pixels` it gets
+  them as one `pixels` trace instead of a mesh per pixel
+  ([#1065](https://github.com/magpylib/magpylib/pull/1065)).
+
+### Changed
+
+- Large field computations, `magpy.func` included, run in chunks on several
+  threads: far less memory, and several times faster on multi-core machines. Set
+  `magpy.defaults.threads` to choose the count, to 1 if you already run
+  computations in parallel
+  ([#1059](https://github.com/magpylib/magpylib/pull/1059)).
+- Faster fields along long paths, and of Polylines on many observers
+  ([#1061](https://github.com/magpylib/magpylib/pull/1061),
+  [#1063](https://github.com/magpylib/magpylib/pull/1063)).
+
+### Fixed
+
+- Sensor pixels: field arrows of left-handed sensors no longer point mirrored,
+  and `style.pixel.field.symbol="none"` with `shownull=False` draws the pixels
+  ([#1065](https://github.com/magpylib/magpylib/pull/1065)).
+- The field of several different `TriangularMesh` magnets on one observer, which
+  could be wrong inside the last magnet or raise an error
+  ([#1062](https://github.com/magpylib/magpylib/pull/1062)).
+
+## [6.0.1] 2026-10-25
+
+### Changed
+
+- Requires scipy 1.17.1 or newer
+  ([#1052](https://github.com/magpylib/magpylib/pull/1052)).
+- Faster `import magpylib`, `show()` and fields along paths
+  ([#1049](https://github.com/magpylib/magpylib/pull/1049)).
+- From a script, Pyvista animations play live in Pyvista's window
+  ([#1051](https://github.com/magpylib/magpylib/pull/1051),
+  [#1053](https://github.com/magpylib/magpylib/pull/1053)).
+
+### Fixed
+
+- Pyvista animations open from scripts on every OS and keep their title, canvas
+  objects and chart panels in every frame
+  ([#1051](https://github.com/magpylib/magpylib/pull/1051),
+  [#1053](https://github.com/magpylib/magpylib/pull/1053)).
+- Animations of paths inside nested Collections
+  ([#1049](https://github.com/magpylib/magpylib/pull/1049)).
+- Force meshes of TriangleStrip, TriangleSheet and Polyline: the same wherever
+  the object sits, and no NaN or failure on path steps
+  ([#1046](https://github.com/magpylib/magpylib/pull/1046),
+  [#1050](https://github.com/magpylib/magpylib/pull/1050)).
+- Custom sources accept bound methods and callable objects as field functions,
+  and are freed when their field function references them
+  ([#1045](https://github.com/magpylib/magpylib/pull/1045),
+  [#1054](https://github.com/magpylib/magpylib/pull/1054)).
+- Objects whose 3D model is drawn by one of their own methods can be shown and
+  copied ([#1055](https://github.com/magpylib/magpylib/pull/1055)).
+
+## [6.0.0] 2026-10-19
+
+### Added
+
+- Physical properties such as `current`, `dimension` or `polarization` can vary
+  along a path; `obj.path_properties` lists them, and derived properties such as
+  `dipole_moment` follow the path
+  ([#916](https://github.com/magpylib/magpylib/pull/916)).
+- Third-party display backends, registered with `magpy.register_backend()` or a
+  `magpylib.backends` entry point, see the backend guide
+  ([#970](https://github.com/magpylib/magpylib/pull/970),
+  [#973](https://github.com/magpylib/magpylib/pull/973),
+  [#978](https://github.com/magpylib/magpylib/pull/978),
+  [#999](https://github.com/magpylib/magpylib/pull/999),
+  [#1011](https://github.com/magpylib/magpylib/pull/1011),
+  [#1029](https://github.com/magpylib/magpylib/pull/1029)).
+- Style and defaults expose `schema()`, `get()`/`set()` and `observe()` for GUI
+  tools, and `defaults.display.units.length` and
+  `defaults.display.legend.maxitems` set `show()`'s defaults
+  ([#967](https://github.com/magpylib/magpylib/pull/967),
+  [#973](https://github.com/magpylib/magpylib/pull/973),
+  [#987](https://github.com/magpylib/magpylib/pull/987),
+  [#1007](https://github.com/magpylib/magpylib/pull/1007)).
+
+### Changed
+
+- **Breaking:** force and torque (`getFT`)
+  - `meshing` is an argument of `getFT`, not of the targets: an integer for all
+    targets or a dict per target, `meshing={ring: 100, coil: 40}`. The old
+    constructor keyword raises with a pointer to the call
+    ([#1017](https://github.com/magpylib/magpylib/issues/1017),
+    [#1025](https://github.com/magpylib/magpylib/pull/1025)).
+  - Cylinders get near-cubic cells, tetrahedra equal sub-tetrahedra, and forces
+    act at the true cell centroids, so results for these classes change at the
+    same `meshing`. `Cylinder` and `CylinderSegment` take a triple
+    `(nphi, nr, nh)` ([#1023](https://github.com/magpylib/magpylib/pull/1023)).
+  - The torque on a Collection target is taken about the Collection's centroid,
+    as for one rigid body, and array pivots count a Collection as one target. A
+    Collection without volume, such as a coil, has the mean of its members'
+    centroids as centroid
+    ([#1018](https://github.com/magpylib/magpylib/issues/1018),
+    [#1024](https://github.com/magpylib/magpylib/pull/1024)).
+- **Breaking:** display and style
+  - A 2D panel no longer mixes outputs in T (`B`, `J`) and in A/m (`H`, `M`)
+    ([#1010](https://github.com/magpylib/magpylib/pull/1010)).
+  - `style.model3d.data` is a tuple: use `add_trace()` instead of
+    `data.append()` ([#987](https://github.com/magpylib/magpylib/pull/987)).
+  - Invalid style values raise `ValueError` instead of `AssertionError`, and
+    number-valued style properties reject booleans
+    ([#967](https://github.com/magpylib/magpylib/pull/967)).
+  - Past `legend_maxitems`, the legend shows its first entries and "… and k
+    more" instead of disappearing
+    ([#1007](https://github.com/magpylib/magpylib/pull/1007)).
+- **Breaking:** misspelled keyword arguments of `getB()`, `getH()`, `getJ()`,
+  `getM()` and `show()` raise instead of being ignored
+  ([#973](https://github.com/magpylib/magpylib/pull/973),
+  [#1005](https://github.com/magpylib/magpylib/pull/1005),
+  [#1011](https://github.com/magpylib/magpylib/pull/1011),
+  [#1014](https://github.com/magpylib/magpylib/pull/1014)).
+- Magpylib's input errors are `ValueError`s
+  ([#1031](https://github.com/magpylib/magpylib/pull/1031)).
+- `show()` is about 3x faster
+  ([#967](https://github.com/magpylib/magpylib/pull/967),
+  [#1022](https://github.com/magpylib/magpylib/pull/1022)).
+
+### Deprecated
+
+- `barycenter`, in favor of `centroid`
+  ([#916](https://github.com/magpylib/magpylib/pull/916),
+  [#1031](https://github.com/magpylib/magpylib/pull/1031)).
+- `getFT(..., return_mesh=True)`; a function returning a target's cells is
+  planned ([#1027](https://github.com/magpylib/magpylib/issues/1027),
+  [#1032](https://github.com/magpylib/magpylib/pull/1032)).
+
+### Removed
+
+- **Breaking:** `getB("Cuboid", ...)` and `getH("Cuboid", ...)`, deprecated in
+  5.2: use `magpylib.func`
+  ([#1005](https://github.com/magpylib/magpylib/pull/1005)).
+- **Breaking:** the deprecated `magnetization.size` key of `as_dict()`
+  ([#967](https://github.com/magpylib/magpylib/pull/967)).
+- **Breaking:** `getFT(..., meshreport=True)`
+  ([#1032](https://github.com/magpylib/magpylib/pull/1032)).
+
+### Fixed
+
+- Display: arrows and legends in Matplotlib animations, pixel fields, 2D panel
+  legends and axis titles, `show(title=...)` and backend arguments that were
+  ignored, some allowed line styles, `show(markers=...)` given as an array,
+  `CustomSource` in Plotly, and Pyvista web exports; drawing no longer sets
+  `faces` and `mesh` on a `TriangleStrip` or `TriangleSheet`
+  ([#973](https://github.com/magpylib/magpylib/pull/973),
+  [#988](https://github.com/magpylib/magpylib/pull/988),
+  [#1010](https://github.com/magpylib/magpylib/pull/1010),
+  [#1013](https://github.com/magpylib/magpylib/pull/1013),
+  [#1014](https://github.com/magpylib/magpylib/pull/1014),
+  [#1021](https://github.com/magpylib/magpylib/pull/1021),
+  [#1022](https://github.com/magpylib/magpylib/pull/1022),
+  [#1037](https://github.com/magpylib/magpylib/pull/1037),
+  [#1039](https://github.com/magpylib/magpylib/pull/1039)).
+- Style: colors given as lists or arrays raised, `style_line={...}` discarded a
+  `style_line_color=...` beside it, and `style.pixel.field.source` accepted an
+  unknown field such as `"Bq"`
+  ([#967](https://github.com/magpylib/magpylib/pull/967),
+  [#1014](https://github.com/magpylib/magpylib/pull/1014),
+  [#1037](https://github.com/magpylib/magpylib/pull/1037)).
+- Force: biased `Tetrahedron` meshes and invalid `meshing` values gave wrong
+  forces ([#1023](https://github.com/magpylib/magpylib/pull/1023)); the centroid
+  of a rotated `Polyline`, `TriangleStrip`, `TriangleSheet` or `Sensor` ignored
+  its orientation, so torques about it were wrong
+  ([#1030](https://github.com/magpylib/magpylib/pull/1030)).
+- `Collection.dipole_moment` mixed its members' frames and is now in the
+  Collection's own frame; `describe()` raised for an open `Polyline` or
+  `TriangleStrip`; a `TriangularMesh` kept the results of its mesh checks after
+  its `faces` or `vertices` changed
+  ([#1030](https://github.com/magpylib/magpylib/pull/1030),
+  [#1037](https://github.com/magpylib/magpylib/pull/1037)).
+- A wrong observer or source was reported as "No observers provided" or "No
+  sources provided" ([#1002](https://github.com/magpylib/magpylib/pull/1002)).
+
 ## [5.2.3] 2026-05-15
 
 - Fixed `getFT` modifying the root logger at import time via

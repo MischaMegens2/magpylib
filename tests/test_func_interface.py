@@ -3,6 +3,7 @@ import pytest
 from scipy.spatial.transform import Rotation as R
 
 import magpylib as magpy
+from magpylib._src.fields import chunks
 from magpylib._src.fields.field_BH_circle import _BHJM_circle
 from magpylib._src.fields.field_BHfunc import _getBH_func
 from magpylib.func import (
@@ -30,6 +31,68 @@ def test_getBHfunc_bad_inputs1():
     }
     with pytest.raises(TypeError):
         _getBH_func(_BHJM_circle, "B", dic, True, {})
+
+
+class _Quantity:
+    """converts with np.array and loses its units, as a pint Quantity"""
+
+    units = "mm"
+
+    def __array__(self, dtype=None, copy=None):
+        return np.array([0, 0, 0.01], dtype=dtype, copy=copy)
+
+
+class _UnitArray(np.ndarray):
+    """an ndarray subclass with units, as an astropy Quantity"""
+
+    unit = "mm"
+
+
+class _NoUnitArray(np.ndarray):
+    """an ndarray subclass without units, as an astropy Column"""
+
+    unit = None
+
+
+class _OtherArray:
+    """converts with np.array and loses nothing, as a JAX array"""
+
+    def __array__(self, dtype=None, copy=None):
+        return np.array([0, 0, 0.01], dtype=dtype, copy=copy)
+
+
+class _Table(_Quantity):
+    """a table can have a column named units, as a pandas DataFrame"""
+
+    def to_numpy(self):
+        return np.array(self)
+
+
+@pytest.mark.parametrize(
+    "observers",
+    [_Quantity(), np.zeros(3).view(_UnitArray), [_Quantity()], [[_Quantity()]]],
+    ids=["quantity", "ndarray subclass", "in a list", "in a nested list"],
+)
+def test_getBHfunc_rejects_units(observers):
+    """values with units raise instead of being read as SI values"""
+    with pytest.raises(TypeError, match="carries units"):
+        circle_field("B", observers=observers, diameters=1, currents=1)
+
+
+@pytest.mark.parametrize(
+    "observers",
+    [
+        _OtherArray(),
+        _Table(),
+        np.array([0, 0, 0.01]).view(_NoUnitArray),
+    ],
+    ids=["other array", "table", "ndarray subclass"],
+)
+def test_getBHfunc_accepts_values_without_units(observers):
+    """what np.array converts without loss keeps working"""
+    ref = circle_field("B", observers=(0, 0, 0.01), diameters=1, currents=1)
+    B = circle_field("B", observers=observers, diameters=np.float64(1), currents=1)
+    np.testing.assert_array_equal(B, ref)
 
 
 def test_getBHfunc_bad_inputs2():
@@ -467,7 +530,12 @@ def test_func_triangle_current():
     obs = (0.3, 0.1, 0.2)
     B1 = tria.getB(obs)
 
-    vert = tria.vertices[tria.faces]
+    # Handle path-varying vertices: if vertices is (p, n, 3), index along axis 1
+    verts = tria.vertices
+    faces = np.squeeze(tria.faces)  # Squeeze faces from (1, 3) to (3,)
+    # path array (p, n, 3)->(p, 3, 3) or single array (n, 3)->(3, 3)
+    vert = verts[:, faces] if verts.ndim == 3 else verts[faces]
+
     B2 = triangle_current_field(
         "B", obs, vert, tria.current_densities, tria.position, tria.orientation
     )
@@ -487,3 +555,59 @@ def test_func_tetrahedron():
         "B", obs, tetra.vertices, tetra.polarization, tetra.position, tetra.orientation
     )
     np.testing.assert_allclose(B1, B2, rtol=1e-12, atol=1e-12)
+
+
+POL = (0.1, 0.2, 1.0)
+TRIANGLE = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+FUNC_INPUTS = {
+    "circle": (circle_field, {"diameters": 1.0, "currents": 1.0}),
+    "polyline": (
+        polyline_field,
+        {"segments_start": (0, 0, 0), "segments_end": (1, 0, 0), "currents": 1.0},
+    ),
+    "cuboid": (cuboid_field, {"dimensions": (1, 1, 1), "polarizations": POL}),
+    "cylinder": (cylinder_field, {"dimensions": (1, 1), "polarizations": POL}),
+    "cylinder segment": (
+        cylinder_segment_field,
+        {"dimensions": (0.5, 1, 1, 0, 90), "polarizations": POL},
+    ),
+    "sphere": (sphere_field, {"diameters": 1.0, "polarizations": POL}),
+    "tetrahedron": (
+        tetrahedron_field,
+        {"vertices": [*TRIANGLE, (0, 0, 1)], "polarizations": POL},
+    ),
+    "dipole": (dipole_field, {"moments": POL}),
+    "triangle charge": (
+        triangle_charge_field,
+        {"vertices": TRIANGLE, "polarizations": POL},
+    ),
+    "triangle current": (
+        triangle_current_field,
+        {"vertices": TRIANGLE, "current_densities": (1, 0, 0)},
+    ),
+}
+
+
+@pytest.mark.parametrize("name", FUNC_INPUTS)
+def test_func_chunks_and_threads_match_one_vectorized_step(name, monkeypatch):
+    """Inputs above CHUNK_ROWS kernel rows run in chunks, on threads, with
+    single instances tiled to each chunk: the field is the one-step field, and
+    the same for any thread count."""
+    func, kwargs = FUNC_INPUTS[name]
+    rng = np.random.default_rng(0)
+    kwargs = {
+        "observers": rng.uniform(-2, 2, (40, 3)),
+        "positions": rng.normal(size=(40, 3)) * 0.1,
+        "orientations": R.from_euler("xyz", (10, 20, 30), degrees=True),
+        **kwargs,
+    }
+    B_one_step = func("B", **kwargs)
+
+    monkeypatch.setattr(chunks, "CHUNK_ROWS", 7)
+    B_chunks = []
+    for threads in (1, 4):
+        monkeypatch.setattr(magpy.defaults, "threads", threads)
+        B_chunks.append(func("B", **kwargs))
+    np.testing.assert_array_equal(B_chunks[0], B_chunks[1])
+    atol = 1e-13 * np.nanmax(np.abs(B_one_step))
+    np.testing.assert_allclose(B_chunks[0], B_one_step, rtol=1e-12, atol=atol)

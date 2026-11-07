@@ -16,7 +16,7 @@ def _calculate_centroid(vertices, faces):
     Calculates the centroid of a 3D triangular surface mesh.
 
     Parameters:
-    vertices (numpy.array): an n x 3 array of vertices
+    vertices (numpy.array): an n x 3 or p x n x 3 array of vertices
     faces (numpy.array): an m x 3 array of triangle indices
 
     Returns:
@@ -24,20 +24,21 @@ def _calculate_centroid(vertices, faces):
     """
 
     # Calculate the centroids of each triangle
-    triangle_centroids = np.mean(vertices[faces], axis=1)
+    mesh = vertices[:, faces] if vertices.ndim == 3 else vertices[faces]
+    axis_v = 1 if mesh.ndim == 3 else 2
+    triangle_centroids = np.mean(mesh, axis=axis_v)
 
     # Compute the area of each triangle
-    triangle_areas = 0.5 * np.linalg.norm(
-        np.cross(
-            vertices[faces[:, 1]] - vertices[faces[:, 0]],
-            vertices[faces[:, 2]] - vertices[faces[:, 0]],
-        ),
-        axis=1,
-    )
+    v0 = mesh[..., 0, :]
+    v1 = mesh[..., 1, :]
+    v2 = mesh[..., 2, :]
+    cross = np.cross(v1 - v0, v2 - v0)
+    triangle_areas = 0.5 * np.linalg.norm(cross, axis=-1)
 
     # Calculate the centroid of the entire mesh
-    return np.sum(triangle_centroids.T * triangle_areas, axis=1) / np.sum(
-        triangle_areas
+    return (
+        np.sum(triangle_centroids * triangle_areas[..., None], axis=-2)
+        / np.sum(triangle_areas, axis=-1)[..., None]
     )
 
 
@@ -485,8 +486,10 @@ def _mask_inside_trimesh(points: np.ndarray, faces: np.ndarray) -> np.ndarray:
 def _BHJM_magnet_trimesh(
     field: str,
     observers: np.ndarray,
-    mesh: np.ndarray,
-    polarization: np.ndarray,
+    mesh: np.ndarray = None,
+    polarization: np.ndarray = None,
+    vertices: np.ndarray = None,
+    faces: np.ndarray = None,
     in_out="auto",
 ) -> np.ndarray:
     """
@@ -494,6 +497,25 @@ def _BHJM_magnet_trimesh(
     - Closed meshes are assumed (input comes only from TriangularMesh class)
     - Field computations via publication: Guptasarma: GEOPHYSICS 1999 64:1, 70-74
     """
+    if len(observers) == 0:
+        return np.zeros((0, 3))
+
+    if mesh is None:
+        if vertices is None or faces is None:
+            msg = "Either 'mesh' or 'vertices' and 'faces' must be provided."
+            raise ValueError(msg)
+        # Construct mesh from vertices and faces
+        # vertices: (p, n, 3), faces: (p, m, 3)
+        n = len(vertices)
+        if object in (vertices.dtype, faces.dtype):
+            meshes = [v[f] for v, f in zip(vertices, faces, strict=True)]
+            # one float array when the meshes have equal face counts, even with
+            # different vertex counts; one entry per mesh otherwise
+            same_shape = len({m.shape for m in meshes}) == 1
+            mesh = np.array(meshes, dtype=float if same_shape else object)
+        else:
+            mesh = vertices[np.arange(n)[:, None, None], faces]
+
     if field in "BH":
         if mesh.ndim != 1:  # all vertices objects have same number of children
             n0, n1, *_ = mesh.shape
@@ -529,25 +551,21 @@ def _BHJM_magnet_trimesh(
         return BHJM / MU0
 
     if in_out == "auto":
-        prev_ind = 0
-        # group similar meshes for inside-outside evaluation and adding B
-        for new_ind_item, _ in enumerate(BHJM):
-            new_ind = new_ind_item
-            if (
-                new_ind == len(BHJM) - 1
-                or mesh[new_ind].shape != mesh[prev_ind].shape
-                or not np.all(mesh[new_ind] == mesh[prev_ind])
-            ):
-                if new_ind == len(BHJM) - 1:
-                    new_ind = len(BHJM)
-                mask_inside = _mask_inside_trimesh(
-                    observers[prev_ind:new_ind], mesh[prev_ind]
-                )
-                # if inside magnet add polarization vector
-                BHJM[prev_ind:new_ind][mask_inside] += polarization[prev_ind:new_ind][
-                    mask_inside
-                ]
-                prev_ind = new_ind
+        # test each run of rows with the same mesh against that mesh, the last
+        # run included, and add the polarization where the observer is inside
+        if mesh.ndim != 1:  # all meshes have the same number of faces
+            changed = np.any(mesh[1:] != mesh[:-1], axis=(1, 2, 3))
+            starts = (np.flatnonzero(changed) + 1).tolist()
+        else:
+            starts = [
+                i
+                for i in range(1, len(mesh))
+                if mesh[i].shape != mesh[i - 1].shape
+                or not np.array_equal(mesh[i], mesh[i - 1])
+            ]
+        for start, end in zip([0, *starts], [*starts, len(BHJM)], strict=True):
+            mask_inside = _mask_inside_trimesh(observers[start:end], mesh[start])
+            BHJM[start:end][mask_inside] += polarization[start:end][mask_inside]
     elif in_out == "inside":
         BHJM += polarization
 

@@ -4,12 +4,15 @@
 # pylint: disable=cyclic-import
 # import numbers
 
+import reprlib
+import sys
 import warnings
 from collections.abc import Callable, Sequence
 from contextlib import contextmanager
 from functools import cache
 from inspect import signature
 from math import log10
+from pathlib import Path
 
 import numpy as np
 
@@ -23,8 +26,7 @@ def get_allowed_sources_msg():
     return f"""Sources must be either
 - one of type {srcs}
 - Collection with at least one of the above
-- 1D list of the above
-- string {srcs}"""
+- 1D list of the above"""
 
 
 ALLOWED_OBSERVER_MSG = """Observers must be either
@@ -43,17 +45,19 @@ def wrong_obj_msg(*objs, allow="sources"):
     """return error message for wrong object type provided"""
     assert len(objs) <= 1, "only max one obj allowed"
     allowed = allow.split("+")
-    prefix = "No" if len(allowed) == 1 else "Bad"
-    msg = f"{prefix} {'/'.join(allowed)} provided"
+    obj = objs[0] if objs else None
+    given = obj is not None and not (
+        isinstance(obj, list | tuple | np.ndarray) and len(obj) == 0
+    )
+    msg = f"{'Bad' if given else 'No'} {'/'.join(allowed)} provided"
     if "sources" in allowed:
         msg += "\n" + get_allowed_sources_msg()
     if "observers" in allowed:
         msg += "\n" + ALLOWED_OBSERVER_MSG
     if "sensors" in allowed:
         msg += "\n" + ALLOWED_SENSORS_MSG
-    if objs:
-        obj = objs[0]
-        msg += f"\nreceived {obj!r} of type {type(obj).__name__!r} instead."
+    if given:
+        msg += f"\nreceived {reprlib.repr(obj)} of type {type(obj).__name__!r} instead."
     return msg
 
 
@@ -76,7 +80,7 @@ def format_obj_input(*objects: Sequence, allow="sources+sensors", warn=True) -> 
     ### Info:
     - exits if invalid sources are given
     """
-    from magpylib._src.obj_classes.class_BaseExcitations import BaseSource  # noqa: I001, PLC0415
+    from magpylib._src.obj_classes.class_BaseExcitations import BaseSource  # noqa: PLC0415
     from magpylib._src.obj_classes.class_Sensor import Sensor  # noqa: PLC0415
 
     obj_list = []
@@ -111,7 +115,7 @@ def format_src_inputs(sources) -> list:
     - raises an error if sources format is bad
     """
 
-    from magpylib._src.obj_classes.class_BaseExcitations import BaseSource  # noqa: I001, PLC0415
+    from magpylib._src.obj_classes.class_BaseExcitations import BaseSource  # noqa: PLC0415
     from magpylib._src.obj_classes.class_Collection import Collection  # noqa: PLC0415
 
     # store all sources here
@@ -137,22 +141,6 @@ def format_src_inputs(sources) -> list:
     return list(sources), src_list
 
 
-def check_static_sensor_orient(sensors):
-    """test which sensors have a static orientation"""
-    # pylint: disable=protected-access
-    static_sensor_rot = []
-    for sens in sensors:
-        if len(sens._position) == 1:  # no sensor path (sensor is static)
-            static_sensor_rot += [True]
-        else:  # there is a sensor path
-            rot = sens.orientation.as_quat()
-            if np.all(rot == rot[0]):  # path with static orient (e.g. translation)
-                static_sensor_rot += [True]
-            else:  # sensor rotation changes along path
-                static_sensor_rot += [False]
-    return static_sensor_rot
-
-
 def check_duplicates(obj_list: Sequence) -> list:
     """checks for and eliminates source duplicates in a list of sources
     ### Args:
@@ -173,31 +161,11 @@ def check_duplicates(obj_list: Sequence) -> list:
     return obj_list_new
 
 
-def check_path_format(inp):
-    """check if each object path has same length
-    of obj.pos and obj.rot
-    Parameters
-    ----------
-    inp: single BaseGeo or list of BaseGeo objects
-    Returns
-    -------
-    no return
-    """
-    # pylint: disable=protected-access
-    if not isinstance(inp, list):
-        inp = [inp]
-    result = all(len(obj._position) == len(obj._orientation) for obj in inp)
-
-    if not result:
-        msg = "Bad path format: position and orientation have different lengths."
-        raise MagpylibBadUserInput(msg)
-
-
 def filter_objects(obj_list, allow="sources+sensors", warn=True):
     """
     return only allowed objects - e.g. no sensors. Throw a warning when something is eliminated.
     """
-    from magpylib._src.obj_classes.class_BaseExcitations import BaseSource  # noqa: I001, PLC0415
+    from magpylib._src.obj_classes.class_BaseExcitations import BaseSource  # noqa: PLC0415
     from magpylib._src.obj_classes.class_Collection import Collection  # noqa: PLC0415
     from magpylib._src.obj_classes.class_Sensor import Sensor  # noqa: PLC0415
 
@@ -240,6 +208,11 @@ _UNIT_PREFIX = {
 }
 
 _UNIT_PREFIX_REVERSED = {v: k for k, v in _UNIT_PREFIX.items()}
+_DECI_CENTI = {"d": -1, "c": -2}
+
+# Length units `get_unit_factor(..., target_unit="m")` accepts, deci and centi
+# included -- it enables them by default.
+LENGTH_UNITS = tuple(f"{p}m" for p in (*_UNIT_PREFIX_REVERSED, *_DECI_CENTI))
 
 
 @cache
@@ -250,7 +223,7 @@ def get_unit_factor(unit_input, *, target_unit, deci_centi=True):
     pref, suff, factor_power = "", "", None
     prefs = _UNIT_PREFIX_REVERSED
     if deci_centi:
-        prefs = {**_UNIT_PREFIX_REVERSED, "d": -1, "c": -2}
+        prefs = {**_UNIT_PREFIX_REVERSED, **_DECI_CENTI}
     unit_input_str = str(unit_input)
     if unit_input_str:
         if len(unit_input_str) >= 2:
@@ -396,16 +369,23 @@ def is_notebook() -> bool:  # pragma: no cover
     """Check if execution is within a IPython environment"""
     # pylint: disable=import-outside-toplevel
     try:
+        # ipython 9.17 hands out get_ipython through a module __getattr__, so
+        # pylint no longer finds the name by reading the module
+        # pylint: disable-next=no-name-in-module
         from IPython import get_ipython  # noqa: PLC0415
 
         shell = get_ipython().__class__.__name__
-    except NameError:
-        return False  # Probably standard Python interpreter
+    except (ImportError, NameError):
+        return False  # standard Python interpreter, or no IPython installed
     return shell == "ZMQInteractiveShell"  # True only for Jupyter notebook or qtconsole
 
 
 def open_animation(filepath, embed=True):
-    """Display video or gif file using tkinter or IPython"""
+    """Display a gif or mp4 file in the notebook, or open it in the system viewer.
+
+    Return True when a viewer outside the notebook got the file: it reads it
+    after this call returns, so the file must stay.
+    """
     # pylint: disable=import-outside-toplevel
     if is_notebook():
         if str(filepath).lower().endswith(".gif"):
@@ -420,17 +400,32 @@ def open_animation(filepath, embed=True):
         else:  # pragma: no cover
             msg = "Filetype not supported, only 'mp4 or 'gif' allowed."
             raise TypeError(msg)
-    else:
-        import webbrowser  # noqa: PLC0415
+        return False
+    import webbrowser  # noqa: PLC0415
 
-        webbrowser.open(filepath)
+    path = Path(filepath).absolute()
+    # the openers want a string, a Path raises on macOS and Linux; Windows
+    # takes the path itself, as it can misread non-ASCII escapes in a file URL
+    url = str(path) if sys.platform == "win32" else path.as_uri()
+    if not webbrowser.open(url):
+        msg = f"No viewer could open the animation, it is saved at {path}"
+        warnings.warn(msg, UserWarning, stacklevel=2)
+    return True
+
+
+def has_parameter(func: Callable, param_name: str) -> bool:
+    """Check if input function has a specific parameter"""
+    # only Magpylib's own field functions are cached: they live for the whole
+    # session, while a cached user callable would keep its source alive
+    if (getattr(func, "__module__", None) or "").startswith("magpylib."):
+        return param_name in _own_parameter_names(func)
+    return param_name in signature(func, follow_wrapped=False).parameters
 
 
 @cache
-def has_parameter(func: Callable, param_name: str) -> bool:
-    """Check if input function has a specific parameter"""
-    sig = signature(func)
-    return param_name in sig.parameters
+def _own_parameter_names(func: Callable) -> frozenset:
+    """Parameter names of a Magpylib field function"""
+    return frozenset(signature(func, follow_wrapped=False).parameters)
 
 
 def merge_dicts_with_conflict_check(objs, *, target, identifiers, unique_fields):
@@ -497,23 +492,31 @@ def merge_dicts_with_conflict_check(objs, *, target, identifiers, unique_fields)
 
 @contextmanager
 def style_temp_edit(*objs, styles_temp=None):
-    """Temporary replace style to allow edits before returning to original state"""
+    """Temporarily replace object styles for the duration of a render.
+
+    When a temporary style is provided for an object, rendering reads and
+    mutates that temporary style, so the original ``_style`` instance is
+    untouched and gets restored as-is - preserving its identity (and any
+    change observers bound to it, e.g. a GUI). When no temporary style is
+    provided, rendering mutates the object's own style in place, so a snapshot
+    copy is restored instead.
+    """
     # pylint: disable=protected-access
     styles_temp = {} if styles_temp is None else styles_temp
     orig_styles = {}
     try:
         for obj in objs:
             style_temp = styles_temp.get(obj, None)
-            orig_styles[obj] = getattr(obj, "_style", None)
-            # temporary save original style
-            if orig_styles[obj] is not None:
-                orig_styles[obj] = obj._style.copy()
+            orig = getattr(obj, "_style", None)
             if style_temp is not None:
+                orig_styles[obj] = orig  # untouched during render; restore instance
                 obj._style = style_temp
+            elif orig is not None:
+                orig_styles[obj] = orig.copy()  # mutated in place; restore snapshot
         yield
     finally:
-        for obj in objs:
-            obj._style = orig_styles[obj]
+        for obj, orig in orig_styles.items():
+            obj._style = orig
 
 
 def is_array_like(inp):

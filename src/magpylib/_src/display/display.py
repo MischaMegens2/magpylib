@@ -1,152 +1,27 @@
 """Display function codes"""
 
-import warnings
 from contextlib import contextmanager
-from importlib import import_module
-from typing import ClassVar
 
-from matplotlib.axes import Axes as mplAxes
-from matplotlib.figure import Figure as mplFig
-
-from magpylib._src.defaults.defaults_utility import _DefaultValue, get_defaults_dict
-from magpylib._src.display.traces_generic import MagpyMarkers, get_frames
+from magpylib._src.defaults.defaults_utility import _DefaultValue
+from magpylib._src.display.backend_registry import ShowDispatcher
+from magpylib._src.display.traces_generic import MagpyMarkers
 from magpylib._src.display.traces_utility import (
     DEFAULT_ROW_COL_PARAMS,
     process_show_input_objs,
+    row_col_defaults,
 )
 from magpylib._src.input_checks import (
     check_format_input_backend,
-    check_format_input_vector,
+    check_format_input_numeric,
     check_input_animation,
     check_input_canvas_update,
 )
-from magpylib._src.utility import check_path_format
-
-disp_args = set(get_defaults_dict("display"))
-
-
-class RegisteredBackend:
-    """Base class for display backends"""
-
-    backends: ClassVar[dict[str, "RegisteredBackend"]] = {}
-
-    def __init__(
-        self,
-        *,
-        name,
-        show_func,
-        supports_animation,
-        supports_subplots,
-        supports_colorgradient,
-        supports_animation_output,
-    ):
-        self.name = name
-        self.show_func = show_func
-        self.supports = {
-            "animation": supports_animation,
-            "subplots": supports_subplots,
-            "colorgradient": supports_colorgradient,
-            "animation_output": supports_animation_output,
-        }
-        self._register_backend(name)
-
-    def _register_backend(self, name):
-        self.backends[name] = self
-
-    @classmethod
-    def show(
-        cls,
-        *objs,
-        backend,
-        title=None,
-        max_rows=None,
-        max_cols=None,
-        subplot_specs=None,
-        **kwargs,
-    ):
-        """Display function of the current backend"""
-        self = cls.backends[backend]
-        fallback = {
-            "animation": {"animation": False},
-            "subplots": {"row": None, "col": None},
-            "animation_output": {"animation_output": None},
-        }
-        for name, params in fallback.items():
-            condition = not all(kwargs.get(k, v) == v for k, v in params.items())
-            if condition and not self.supports[name]:
-                supported = [k for k, v in self.backends.items() if v.supports[name]]
-                supported_str = (
-                    f"one of {supported!r}"
-                    if len(supported) > 1
-                    else f"{supported[0]!r}"
-                )
-                warnings.warn(
-                    "Unsupported feature for selected backend: "
-                    f"the {backend} backend does not support {name!r}. "
-                    f"Use {supported_str} instead. "
-                    f"Falling back to: {params}",
-                    stacklevel=2,
-                )
-                kwargs.update(params)
-        display_kwargs = {
-            k: v
-            for k, v in kwargs.items()
-            if any(k.startswith(arg) for arg in disp_args)
-        }
-        kwargs = {k: v for k, v in kwargs.items() if k not in display_kwargs}
-        backend_kwargs = {
-            k[len(backend) + 1 :]: v
-            for k, v in kwargs.items()
-            if k.startswith(f"{backend.lower()}_")
-        }
-        backend_kwargs = {**kwargs.pop(backend, {}), **backend_kwargs}
-        kwargs = {k: v for k, v in kwargs.items() if not k.startswith(backend)}
-        fig_kwargs = {
-            **kwargs.pop("fig", {}),
-            **{k[4:]: v for k, v in kwargs.items() if k.startswith("fig_")},
-            **backend_kwargs.pop("fig", {}),
-            **{k[4:]: v for k, v in backend_kwargs.items() if k.startswith("fig_")},
-        }
-        show_kwargs = {
-            **kwargs.pop("show", {}),
-            **{k[5:]: v for k, v in kwargs.items() if k.startswith("show_")},
-            **backend_kwargs.pop("show", {}),
-            **{k[5:]: v for k, v in backend_kwargs.items() if k.startswith("show_")},
-        }
-        kwargs = {
-            k: v for k, v in kwargs.items() if not (k.startswith(("fig", "show")))
-        }
-        data = get_frames(
-            objs,
-            supports_colorgradient=self.supports["colorgradient"],
-            backend=backend,
-            title=title,
-            **display_kwargs,
-        )
-        return self.show_func(
-            data,
-            max_rows=max_rows,
-            max_cols=max_cols,
-            subplot_specs=subplot_specs,
-            fig_kwargs=fig_kwargs,
-            show_kwargs=show_kwargs,
-            **kwargs,
-        )
-
-
-def get_show_func(backend):
-    """Return the backend show function"""
-    # defer import to show call. Importerror should only fail if unavalaible backend is called
-    return lambda *args, backend=backend, **kwargs: getattr(
-        import_module(f"magpylib._src.display.backend_{backend}"), f"display_{backend}"
-    )(*args, **kwargs)
 
 
 def infer_backend(canvas):
     """Infers the plotting backend from canvas and environment"""
     # pylint: disable=import-outside-toplevel
     backend = "matplotlib"
-    in_notebook = False
     plotly_available = False
     try:
         # pylint: disable=unused-import
@@ -154,11 +29,17 @@ def infer_backend(canvas):
         from magpylib._src.utility import is_notebook  # noqa: PLC0415
 
         plotly_available = True
-        in_notebook = is_notebook()
-        if in_notebook:
+        if is_notebook():
             backend = "plotly"
     except ImportError:  # pragma: no cover
         pass
+    if canvas is None:
+        # nothing to recognize: importing matplotlib and pyvista to compare
+        # None with their figure types cost a first show() its import time
+        return backend
+    from matplotlib.axes import Axes as mplAxes  # noqa: PLC0415
+    from matplotlib.figure import Figure as mplFig  # noqa: PLC0415
+
     if isinstance(canvas, mplAxes | mplFig):
         backend = "matplotlib"
     elif plotly_available and isinstance(
@@ -192,40 +73,36 @@ def _show(
     """
 
     # process input objs
-    objects, obj_list_flat, max_rows, max_cols, subplot_specs = process_show_input_objs(
+    objects, max_rows, max_cols = process_show_input_objs(
         objects,
         **{k: v for k, v in kwargs.items() if k in DEFAULT_ROW_COL_PARAMS},
     )
     kwargs = {k: v for k, v in kwargs.items() if k not in DEFAULT_ROW_COL_PARAMS}
     canvas_update = check_input_canvas_update(canvas_update, canvas)
-    # test if every individual obj_path is good
-    check_path_format(obj_list_flat)
 
     # input checks
     backend = check_format_input_backend(backend)
     check_input_animation(animation)
-    check_format_input_vector(
+    markers = check_format_input_numeric(
         markers,
-        dims=(2,),
-        shape_m1=3,
-        sig_name="markers",
-        sig_type="array-like of shape (n, 3)",
+        dtype=float,
+        shapes=((None, 3),),
+        name="markers",
         allow_None=True,
     )
 
-    if markers:
-        objects.append({"objects": [MagpyMarkers(*markers)], **DEFAULT_ROW_COL_PARAMS})
+    if markers is not None and len(markers) > 0:
+        objects.append({"objects": [MagpyMarkers(*markers)], **row_col_defaults()})
 
     if backend == "auto":
         backend = infer_backend(canvas)
 
-    return RegisteredBackend.show(
+    return ShowDispatcher.show(
         *objects,
         backend=backend,
         animation=animation,
         canvas=canvas,
         canvas_update=canvas_update,
-        subplot_specs=subplot_specs,
         max_rows=max_rows,
         max_cols=max_cols,
         **kwargs,
@@ -259,16 +136,19 @@ def show(
     ----------
     *objects : Source | Sensor | Collection
         One or multiple Magpylib objects to be displayed.
-    backend : {'auto', 'matplotlib', 'plotly', 'pyvista'}, default 'auto'
-        With ``'auto'`` the backend becomes ``'plotly'`` inside
-        a notebook when Plotly is installed, otherwise ``'matplotlib'``. If
-        ``canvas`` is provided, its type determines the backend.
+    backend : {'auto', 'matplotlib', 'plotly', 'pyvista'} | str, default 'auto'
+        A built-in backend, or any backend registered with
+        `magpylib.register_backend` or installed through the
+        ``magpylib.backends`` entry point. With ``'auto'`` the backend becomes
+        ``'plotly'`` inside a notebook when Plotly is installed, otherwise
+        ``'matplotlib'``. If ``canvas`` is provided, its type determines the
+        backend.
     canvas : None | matplotlib.Figure | plotly.Figure | pyvista.Plotter, default None
         Existing canvas to draw on. If ``None``, a new canvas is created and
         displayed.
     animation : bool | float, default False
         If ``True`` and at least one object has a path, the path is animated.
-        A positive float sets the total animation duration in seconds (Plotly only).
+        A positive float sets the total animation duration in seconds.
     zoom : float, default 0.0
         3D plot zoom level. 0 means tight bounds.
     markers : array-like, shape (n, 3) | None, default None
@@ -276,7 +156,7 @@ def show(
     return_fig : bool, default False
         If ``True``, return the underlying figure object (Figure / FigureWidget / Plotter).
     canvas_update : str | bool, default 'auto'
-        Layout update behaviour when using a provided canvas. With ``'auto'``
+        Layout update behavior when using a provided canvas. With ``'auto'``
         applies internal layout only for newly created canvases. ``True`` forces
         update, ``False`` suppresses it.
     row : int | None, default None
@@ -287,13 +167,42 @@ def show(
         Plot output type. ``'model3d'`` shows 3D geometry. Field plots are defined via
         component strings like ``'Bx'``, ``'Bxy'``, ``'Hyz'``. Multiple axes in a string
         imply vector norm combination (e.g., ``'Bxy'`` => ``sqrt(Bx**2 + By**2)``).
+        The outputs of one panel share its y axis and so its unit: ``B`` and ``J``
+        in T, or ``H`` and ``M`` in A/m.
     sumup : bool, default True
         Sum field contributions of sources.
     pixel_agg : str, default 'mean'
         NumPy reducer applied across sensor pixels (e.g., ``'min'``, ``'max'``, ``'std'``).
+    in_out : {'auto', 'inside', 'outside'}, default 'auto'
+        Assumption about observer locations relative to magnet bodies, used by field
+        plots. ``'auto'`` detects per observer (safest, slower). ``'inside'`` treats all
+        inside (faster). ``'outside'`` treats all outside (faster).
+    units_length : str, default 'auto'
+        Length unit the scene is drawn in, e.g. ``'mm'``. With ``'auto'`` the unit is
+        inferred from the extent of the displayed system. The default is configurable
+        via ``magpy.defaults.display.units.length``.
+    legend_maxitems : int, default 20
+        Most entries a legend lists. Past it, that many are listed and the rest
+        summed up in one more, "… and k more", entry; ``0`` hides the legend.
+        Matplotlib and Pyvista apply it to each 3D subplot's legend and leave 2D
+        legends whole; Plotly applies it to its one legend.
+        The default is configurable via ``magpy.defaults.display.legend.maxitems``.
     style : dict | None, default None
         Global style overrides, e.g. ``{'color': 'red'}`` or via underscore magic
         (``style_color='red'``). Applied to matching objects.
+    title : str | None, default None
+        Figure title. Without one, a lone object's label is the title.
+    **kwargs
+        Backend-specific arguments, forwarded unchanged: bare (``renderer='png'``)
+        or prefixed with the backend's name (``plotly_renderer='png'``, which
+        wins). ``fig_*`` reaches the backend's figure (Matplotlib's
+        ``plt.figure``, Pyvista's ``Plotter``, Plotly's ``Figure.update``) and
+        ``show_*`` its show call, e.g. ``fig_figsize=(6, 6)`` with Matplotlib or
+        ``fig_layout_width=600`` with Plotly; ``fig=dict(...)`` and
+        ``show=dict(...)`` are the same, spelled nested. A backend declares what
+        it accepts and magpylib warns about the rest; what the library then
+        rejects raises the library's own error, with a note naming the
+        argument.
 
     Returns
     -------
@@ -420,13 +329,13 @@ def show_context(
     objects : Source | Sensor | Collection
         One or more Magpylib objects to register up-front for display.
     backend : str, default magpylib.defaults.display.backend
-        Plotting backend: ``'auto'``, ``'matplotlib'``, ``'plotly'``, or
-        ``'pyvista'``.
+        Plotting backend: ``'auto'``, ``'matplotlib'``, ``'plotly'``,
+        ``'pyvista'``, or a registered backend's name, as in `show`.
     canvas : None | matplotlib.Figure | plotly.Figure | pyvista.Plotter, default None
         Existing canvas to draw on. If ``None``, a new canvas is created.
     animation : bool | float, default False
         If ``True`` (and at least one object has a path) the path is animated.
-        A positive float sets total animation duration in seconds (Plotly only).
+        A positive float sets total animation duration in seconds.
     zoom : float, default 0.0
         3D plot zoom level 0.0 means tight bounds.
     markers : array-like, shape (n, 3) | None, default None
@@ -434,14 +343,16 @@ def show_context(
     return_fig : bool, default False
         If ``True``, return the underlying figure from the final render.
     canvas_update : str | bool, default 'auto'
-        Layout update behaviour when using a provided canvas: ``'auto'``,
+        Layout update behavior when using a provided canvas: ``'auto'``,
         ``True``, or ``False``.
     row : int | None, default None
         Subplot row index for all enclosed ``show()`` calls that omit ``row``.
     col : int | None, default None
         Subplot column index for all enclosed ``show()`` calls that omit ``col``.
     output : str | tuple[str, ...], default 'model3d'
-        Plot output type (e.g., ``'model3d'``, ``'Bx'``, ``'Bxy'``, ``'Hyz'``).
+        Plot output type (e.g., ``'model3d'``, ``'Bx'``, ``'Bxy'``, ``'Hyz'``). The
+        outputs of one panel share its y axis and so its unit: ``B`` and ``J`` in T,
+        or ``H`` and ``M`` in A/m.
     sumup : bool, default True
         Sum source contributions when ``output != 'model3d'``.
     pixel_agg : str, default 'mean'
@@ -479,8 +390,13 @@ def show_context(
 
     >>> import magpylib as magpy
     >>> import plotly.graph_objects as go
+    >>> src1 = magpy.magnet.Sphere(diameter=1, polarization=(0, 0, 1))
+    >>> src2 = magpy.magnet.Cuboid(dimension=(1, 1, 1), polarization=(0, 0, 1))
+    >>> sensor = magpy.Sensor()
     >>> fig = go.Figure()
-    >>> with magpy.show_context(src1, src2, sensor, canvas=fig, backend='plotly', animation=True) as ctx:
+    >>> with magpy.show_context(  # doctest: +SKIP
+    ...     src1, src2, sensor, canvas=fig, backend='plotly', animation=True
+    ... ) as ctx:
     ...     magpy.show(col=1, output='model3d')
     ...     magpy.show(col=2, output='Bxy', sumup=True)
     ...     magpy.show(col=3, output='Bz', sumup=False)
@@ -531,32 +447,3 @@ class DisplayContext:
 
 
 ctx = DisplayContext()
-
-
-RegisteredBackend(
-    name="matplotlib",
-    show_func=get_show_func("matplotlib"),
-    supports_animation=True,
-    supports_subplots=True,
-    supports_colorgradient=False,
-    supports_animation_output=False,
-)
-
-
-RegisteredBackend(
-    name="plotly",
-    show_func=get_show_func("plotly"),
-    supports_animation=True,
-    supports_subplots=True,
-    supports_colorgradient=True,
-    supports_animation_output=False,
-)
-
-RegisteredBackend(
-    name="pyvista",
-    show_func=get_show_func("pyvista"),
-    supports_animation=True,
-    supports_subplots=True,
-    supports_colorgradient=True,
-    supports_animation_output=True,
-)

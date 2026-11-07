@@ -21,7 +21,14 @@ from magpylib._src.defaults.defaults_utility import (
     ALLOWED_SYMBOLS,
     linearize_dict,
 )
+from magpylib._src.display.api import (
+    AnimationSettings,
+    Frame,
+    Panel,
+    Scene,
+)
 from magpylib._src.display.traces_utility import (
+    _get_prop,
     draw_arrowed_line,
     get_legend_label,
     get_objects_props_by_row_col,
@@ -29,11 +36,13 @@ from magpylib._src.display.traces_utility import (
     getColorscale,
     getIntensity,
     group_traces,
+    line_dash,
     path_frames_to_indices,
     place_and_orient_model3d,
     rescale_traces,
     slice_mesh_from_colorscale,
 )
+from magpylib._src.input_checks import check_input_legend_maxitems
 from magpylib._src.style import DefaultMarkers
 from magpylib._src.utility import (
     format_obj_input,
@@ -46,6 +55,8 @@ from magpylib._src.utility import (
 class MagpyMarkers:
     """A class that stores markers 3D-coordinates."""
 
+    _style_family = ("markers",)
+
     def __init__(self, *markers):
         self._style = DefaultMarkers()
         self.markers = np.array(markers)
@@ -56,8 +67,7 @@ class MagpyMarkers:
         return self._style
 
     def get_trace(self, **kwargs):
-        """Create the plotly mesh3d parameters for a Sensor object in a dictionary based on the
-        provided arguments."""
+        """Return the generic scatter3d trace of the markers."""
         style = self.style
         x, y, z = self.markers.T
         marker_kwargs = {
@@ -84,7 +94,7 @@ class MagpyMarkers:
 
 
 def update_magnet_mesh(
-    mesh_dict, mag_style=None, magnetization=None, color_slicing=False
+    input_obj, style, mesh_dict, color_slicing=False, path_ind=None, show_color=None
 ):
     """
     Updates an existing plotly mesh3d dictionary of an object which has a magnetic vector. The
@@ -92,10 +102,18 @@ def update_magnet_mesh(
     Slicing allows for Matplotlib to show colorgradients approximations by slicing the mesh into
     the colorscales colors, remesh it and merge with assigning facecolor for each part.
     """
+    mag_style = style.magnetization
     mag_color = mag_style.color
-    if magnetization is None:
+    mag_arr = input_obj._magnetization
+    if mag_arr is None:
         magnetization = np.array([0.0, 0.0, 0.0], dtype=float)
-    if mag_style.show:
+    elif path_ind is None:
+        magnetization = mag_arr[0]
+    else:
+        # lazy access: clamp path_ind when magnetization is stored shorter
+        # than the object's overall path length
+        magnetization = _get_prop(mag_arr, path_ind)
+    if mag_style.show if show_color is None else show_color:
         vertices = np.array([mesh_dict[k] for k in "xyz"]).T
         color_middle = mag_color.middle
         if mag_color.mode == "tricycle":
@@ -121,12 +139,11 @@ def update_magnet_mesh(
                 vertices=vertices,
                 axis=magnetization,
             )
-        mesh_dict["showscale"] = False
         mesh_dict.pop("color_slicing", None)
     return mesh_dict
 
 
-def make_mag_arrows(obj):
+def make_mag_arrows(obj, path_ind=-1):
     """draw direction of magnetization of faced magnets
 
     Parameters
@@ -135,31 +152,44 @@ def make_mag_arrows(obj):
     - colors: colors of faced_objects
     - show_path(bool or int): draw on every position where object is displayed
     """
+    # TODO needs to be integragted with magmesh because of frame dependent magnetization
     # pylint: disable=protected-access
 
     # vector length, color and magnetization
+
+    mag = obj._magnetization
+    mag = np.array([[0.0, 0.0, 0.0]]) if mag is None else mag
+    mag = _get_prop(mag, path_ind) if mag.ndim == 2 else mag
+    if np.all(mag == 0):
+        return None
     style = obj.style
     arrow = style.magnetization.arrow
     length = 1
     color = style.color if arrow.color is None else arrow.color
     if arrow.sizemode == "scaled":
         if hasattr(obj, "diameter"):
-            length = obj.diameter  # Sphere
+            length = _get_prop(obj._diameter, path_ind)  # Sphere
         elif isinstance(obj, magpy.misc.Triangle):
-            length = np.amax(obj.vertices) - np.amin(obj.vertices)
+            verts = obj._vertices
+            verts = _get_prop(verts, path_ind) if verts.ndim == 3 else verts
+            length = np.amax(verts) - np.amin(verts)
         elif hasattr(obj, "mesh"):
-            length = np.amax(np.ptp(obj.mesh.reshape(-1, 3), axis=0))
+            mesh = obj.mesh
+            mesh = _get_prop(mesh, path_ind) if mesh.ndim == 4 else mesh
+            length = np.amax(np.ptp(mesh.reshape(-1, 3), axis=0))
         elif hasattr(obj, "vertices"):
-            length = np.amax(np.ptp(obj.vertices, axis=0))
+            verts = obj._vertices
+            verts = _get_prop(verts, path_ind) if verts.ndim == 3 else verts
+            length = np.amax(np.ptp(verts, axis=0))
         else:  # Cuboid, Cylinder, CylinderSegment
-            length = np.amax(obj.dimension[:3])
+            length = np.amax(_get_prop(obj._dimension, path_ind)[:3])
         length *= 1.5
     length *= arrow.size
-    mag = obj.magnetization
     # collect all draw positions and directions
-    pos = getattr(obj, "_barycenter", obj._position)[0] - obj._position[0]
-    # we need initial relative barycenter, arrow gets orientated later
-    pos = obj._orientation[0].inv().apply(pos)
+    centroid = getattr(obj, "_centroid", obj._position)
+    pos = _get_prop(centroid, path_ind) - _get_prop(obj._position, path_ind)
+    # we need initial relative centroid, arrow gets orientated later
+    pos = _get_prop(obj._orientation, path_ind).inv().apply(pos)
     direc = mag / (np.linalg.norm(mag) + 1e-6) * length
     x, y, z = draw_arrowed_line(
         direc, pos, sign=1, arrow_pos=arrow.offset, pivot="tail"
@@ -168,7 +198,7 @@ def make_mag_arrows(obj):
         "type": "scatter3d",
         "mode": "lines",
         "line_width": arrow.width,
-        "line_dash": arrow.style,
+        "line_dash": line_dash(arrow.style),
         "line_color": color,
         "x": x,
         "y": y,
@@ -180,7 +210,7 @@ def make_mag_arrows(obj):
 def make_path(input_obj, label=None):
     """draw obj path based on path style properties"""
     style = input_obj.style
-    x, y, z = np.array(input_obj.position).T
+    x, y, z = np.array(input_obj._position).T
     txt_kwargs = (
         {"mode": "markers+text+lines", "text": list(range(len(x)))}
         if style.path.numbering
@@ -190,7 +220,7 @@ def make_path(input_obj, label=None):
     marker["symbol"] = marker["symbol"]
     marker["color"] = style.color if marker["color"] is None else marker["color"]
     line = style.path.line.as_dict()
-    line["dash"] = line["style"]
+    line["dash"] = line_dash(line["style"])
     line["color"] = style.color if line["color"] is None else line["color"]
     line = {k: v for k, v in line.items() if k != "style"}
     return {
@@ -206,6 +236,43 @@ def make_path(input_obj, label=None):
     }
 
 
+#: Unit of each field a 2D panel plots. The curves of a panel share one y
+#: axis, so the outputs of a panel must share one unit.
+FIELD_UNITS = {"B": "T", "J": "T", "H": "A/m", "M": "A/m"}
+
+
+def parse_2d_output(output):
+    """The outputs of a 2D panel as ``[(output, field, coords), ...]``, and
+    the unit they share.
+
+    ``"Bxy"`` is the norm of Bx and By, ``"B"`` the norm of all three.
+    """
+    outputs = list(output) if isinstance(output, list | tuple) else [output]
+    parsed = []
+    for out in outputs:
+        field_str, *coords_str = out if isinstance(out, str) and out else ("",)
+        coords_str = coords_str or list("xyz")
+        if field_str not in FIELD_UNITS or set(coords_str) - set("xyz"):
+            msg = (
+                "Input output must be a string starting with 'B', 'H', 'M', 'J' "
+                "and be followed by a combination of 'x', 'y', 'z' (e.g. 'Bxy' or ('Bxy', 'Bz') ); "
+                f"instead received {out!r}."
+            )
+            raise ValueError(msg)
+        parsed.append((out, field_str, coords_str))
+    units = {FIELD_UNITS[field] for _, field, _ in parsed}
+    if len(units) > 1:
+        # outside a magnet H is B/mu0 numerically, so one curve of the two
+        # would sit some 800,000 times above the other and the other be flat
+        msg = (
+            f"Input output {tuple(outputs)!r} puts fields in T (B, J) and in "
+            "A/m (H, M) on one axis, where one of them could not be read; "
+            "give them separate panels, e.g. with col=1 and col=2."
+        )
+        raise ValueError(msg)
+    return parsed, units.pop()
+
+
 def get_trace2D_dict(
     BH,
     *,
@@ -216,8 +283,6 @@ def get_trace2D_dict(
     frames_indices,
     mode,
     label_suff,
-    units_polarization,
-    units_magnetization,
     **kwargs,
 ):
     """return a 2d trace based on field and parameters"""
@@ -227,13 +292,7 @@ def get_trace2D_dict(
     marker_size = np.array([3] * len(frames_indices))
     marker_size[np.clip(focus_inds, None, len(marker_size) - 1)] = 15
     title = f"{field_str}{''.join(coords_str)}"
-    unit = (
-        units_polarization
-        if field_str in "BJ"
-        else units_magnetization
-        if field_str in "HM"
-        else ""
-    )
+    unit = FIELD_UNITS[field_str]
     trace = {
         "mode": "lines+markers",
         "legendgrouptitle_text": f"{title}"
@@ -258,18 +317,22 @@ def get_trace2D_dict(
 
 def get_traces_2D(
     *objects,
+    legend_show=None,
     output=("Bx", "By", "Bz"),
     row=None,
     col=None,
     sumup=True,
     pixel_agg=None,
     in_out="auto",
-    units_polarization="T",
-    units_magnetization="A/m",
     units_length="m",  # noqa: ARG001
     zoom=0,  # noqa: ARG001
 ):
-    """draws and animates sensor values over a path in a subplot"""
+    """draws and animates sensor values over a path in a subplot
+
+    `legend_show` maps each object to whether it is listed in a legend; a
+    curve is listed when the object it is named after is -- the sensor when
+    sources are summed up, the source otherwise.
+    """
     # pylint: disable=import-outside-toplevel
     from magpylib._src.fields.field_BH import _getBH_level2  # noqa: PLC0415
 
@@ -286,28 +349,14 @@ def get_traces_2D(
         for sub_s in (s.sensors_all if isinstance(s, magpy.Collection) else [s])
     ]
 
-    if not isinstance(output, list | tuple):
-        output = [output]
-    output_params = {}
-    field_str_list = []
-    for out, linestyle in zip(output, cycle(ALLOWED_LINESTYLES[:6])):
-        field_str, *coords_str = out
-        if not coords_str:
-            coords_str = list("xyz")
-        if field_str not in "BHMJ" and set(coords_str).difference(set("xyz")):
-            msg = (
-                "Input output must be a string starting with 'B', 'H', 'M', 'J' "
-                "and be followed by a combination of 'x', 'y', 'z' (e.g. 'Bxy' or ('Bxy', 'Bz') ); "
-                f"instead received {out!r}."
-            )
-            raise ValueError(msg)
-        field_str_list.append(field_str)
-        output_params[out] = {
-            "field_str": field_str,
-            "coords_str": coords_str,
-            "line_dash": linestyle,
-        }
-    field_str_list = list(dict.fromkeys(field_str_list))
+    parsed, _ = parse_2d_output(output)
+    output_params = {
+        out: {"field_str": field_str, "coords_str": coords_str, "line_dash": dash}
+        for (out, field_str, coords_str), dash in zip(
+            parsed, cycle(ALLOWED_LINESTYLES[:6]), strict=False
+        )
+    }
+    field_str_list = list(dict.fromkeys(field for _, field, _ in parsed))
     BH_array = {}
     for field_str in field_str_list:
         BH_array[field_str] = _getBH_level2(
@@ -338,7 +387,7 @@ def get_traces_2D(
 
     def get_obj_list_str(objs):
         if len(objs) < 8:
-            obj_lst_str = "<br>".join(f" - {s}" for s in objs)
+            obj_lst_str = "<br>".join(f" - {get_legend_label(s)}" for s in objs)
         else:
             counts = Counter(s.__class__.__name__ for s in objs)
             obj_lst_str = "<br>".join(f" {v}x {k}" for k, v in counts.items())
@@ -368,12 +417,18 @@ def get_traces_2D(
             label = label_src
             line_color = color_src
             marker_color = color_sens if len(sensors) > 1 else None
+            named_after = src
             if sumup:
                 line_color = color_sens
                 label = label_sens
+                named_after = sens
                 label_suff = (
                     f"{label_src}" if len(sources) == 1 else f"{len(sources)} sources"
                 )
+            if legend_show is None or named_after not in legend_show:
+                showlegend = named_after.style.legend.show is not False
+            else:
+                showlegend = bool(legend_show[named_after])
             num_of_pix = (
                 len(sens.pixel.reshape(-1, 3))
                 if (not isinstance(sens, magpy.Collection))
@@ -406,11 +461,20 @@ def get_traces_2D(
                             marker_color=marker_color,
                             marker_line_color=marker_color,
                             marker_symbol=marker_symbol,
+                            showlegend=showlegend,
+                            # the object the curve is named after, as for
+                            # its legend entry
+                            object_id=id(named_after),
+                            # one group per output and panel, per sensor when
+                            # sources are not summed up; built from labels it
+                            # merged groups whose labels happened to match
+                            legendgroup=(
+                                f"{param['field_str']}{''.join(param['coords_str'])}"
+                                f"|{row},{col}" + ("" if sumup else f"|{sens_ind}")
+                            ),
                             type="scatter",
                             row=row,
                             col=col,
-                            units_polarization=units_polarization,
-                            units_magnetization=units_magnetization,
                         )
                     )
     return traces
@@ -419,14 +483,19 @@ def get_traces_2D(
 def process_extra_trace(model):
     "process extra trace attached to some magpylib object"
     extr = model["model3d"]
-    model_kwargs = {**(extr.kwargs() if callable(extr.kwargs) else extr.kwargs)}
+    # both default to None: a Matplotlib model is idiomatically given as
+    # args=(xs, ys, zs) with no kwargs at all, so neither may be assumed set
+    model_kwargs = extr.kwargs() if callable(extr.kwargs) else extr.kwargs
+    model_kwargs = {**(model_kwargs or {})}
     model_args = extr.args() if callable(extr.args) else extr.args
+    model_args = tuple(model_args or ())
     trace3d = {
         "constructor": extr.constructor,
         "kwargs": model_kwargs,
         "args": model_args,
         "coordsargs": extr.coordsargs,
         "kwargs_extra": model["kwargs_extra"],
+        "object_id": model.get("object_id"),
     }
     kwargs, args, coordsargs = place_and_orient_model3d(
         model_kwargs=model_kwargs,
@@ -444,6 +513,17 @@ def process_extra_trace(model):
     return trace3d
 
 
+def _varies_along_path(prop):
+    """Whether a path property takes more than one value along the path, counted
+    as ``np.unique`` did: all NaNs as one value in 1D, NaN rows as different."""
+    if len(prop) < 2:
+        return False
+    diff = prop[1:] != prop[:1]
+    if prop.ndim == 1 and prop.dtype.kind in "fc":
+        diff &= ~(np.isnan(prop[1:]) & np.isnan(prop[:1]))
+    return bool(diff.any())
+
+
 def get_generic_traces3D(
     input_obj,
     autosize=None,
@@ -452,7 +532,9 @@ def get_generic_traces3D(
     showlegend=None,
     supports_colorgradient=True,
     extra_backend=False,
+    supports_native_traces=False,
     field_values=None,
+    draws_pixels=False,
     row=1,
     col=1,
     **kwargs,
@@ -477,14 +559,18 @@ def get_generic_traces3D(
     # pylint: disable=protected-access
     # pylint: disable=import-outside-toplevel
     style = input_obj.style
-    is_mag_arrows = False
+    is_mag_arrows = is_mag_color = False
     is_mag = hasattr(input_obj, "magnetization") and hasattr(style, "magnetization")
     if is_mag and style.magnetization.show:
-        magstyl = style.magnetization
-        if magstyl.mode == "auto":
-            magstyl.mode = "color" if supports_colorgradient else "arrow"
-        is_mag_arrows = "arrow" in magstyl.mode
-        magstyl.show = "color" in magstyl.mode
+        # resolved here, never written back: the style is the same object for
+        # every frame of an animation, and writing `show = False` for arrow
+        # mode while drawing the first frame left every later frame without
+        # its arrows
+        mode = style.magnetization.mode
+        if mode == "auto":
+            mode = "color" if supports_colorgradient else "arrow"
+        is_mag_arrows = "arrow" in mode
+        is_mag_color = "color" in mode
 
     get_trace_method = getattr(input_obj, "get_trace", None)
     if get_trace_method is not None:
@@ -499,107 +585,133 @@ def get_generic_traces3D(
     make_func_kwargs = {"legendgroup": legendgroup, **kwargs}
     if getattr(input_obj, "_autosize", False):
         make_func_kwargs["autosize"] = autosize
+    if hasattr(style, "pixel"):
+        make_func_kwargs["field_values"] = field_values
+        make_func_kwargs["draws_pixels"] = draws_pixels
 
     positions = getattr(input_obj, "_position", None)
     orientations = getattr(input_obj, "_orientation", None)
-    has_path = positions is not None and orientations is not None
-    path_len = 1 if positions is None else len(positions)
-    max_pos_ind = path_len - 1
-    is_frame_dependent = False
-    path_inds = path_inds_minimal = path_frames_to_indices(style.path.frames, path_len)
-    if hasattr(style, "pixel"):
-        make_func_kwargs["field_values"] = field_values
-        frsc = style.pixel.field.source
-        is_frame_dependent = frsc and field_values
-        if is_frame_dependent:
-            path_len = len(next(iter(field_values.values())))
-            path_inds = path_frames_to_indices(style.path.frames, path_len)
-
-    path_traces_extra_non_generic_backend = []
-    if not has_path and make_func is not None:
+    if positions is None or orientations is None:
+        # an object without a pose, the `show(markers=...)` markers: not one
+        # of the user's objects, so no object_id to resolve. Every other
+        # object reaching here is a `BaseGeo`, which `show()` checks.
         trs = make_func(**make_func_kwargs)
         for tr in trs:
             tr["row"] = row
             tr["col"] = col
+            tr.setdefault("object_id", None)
+            tr.setdefault("opacity", getattr(style, "opacity", None) or 1)
         out = {"generic": trs}
         if extra_backend:
-            out.update({extra_backend: path_traces_extra_non_generic_backend})
+            out[extra_backend] = []
         return out
 
+    # the true path length, including path properties that are stored
+    # lazily (minimal form) beyond position/orientation
+    path_len = input_obj._get_path_len()
+    path_inds = path_inds_minimal = path_frames_to_indices(style.path.frames, path_len)
+    is_frame_dependent = False
+    if hasattr(style, "pixel"):
+        is_frame_dependent = style.pixel.field.source and field_values
+        if is_frame_dependent:
+            path_len = len(next(iter(field_values.values())))
+            path_inds = path_frames_to_indices(style.path.frames, path_len)
+    for name in input_obj._path_properties:
+        # Skip position and orientation as they're handled separately
+        if name in ("position", "orientation"):
+            continue
+        prop_w_path = getattr(input_obj, f"_{name}")
+        if isinstance(prop_w_path, np.ndarray) and _varies_along_path(prop_w_path):
+            is_frame_dependent = True
+            break
+
     def get_traces_func(**extra_kwargs):
-        nonlocal is_mag
         traces_generic_temp = []
+        path_ind = extra_kwargs.get("path_index", -1)
         if style.model3d.showdefault and make_func is not None:
             p_trs = make_func(**make_func_kwargs, **extra_kwargs)
+            arrows = False
             for p_tr_item in p_trs:
                 p_tr = p_tr_item.copy()
-                is_mag = p_tr.pop("ismagnet", is_mag)
-                if is_mag and p_tr.get("type", "") == "mesh3d":
+                # a get_trace without a path_index argument passes it through
+                p_tr.pop("path_index", None)
+                # a trace marked as not the magnet's body, such as orientation
+                # markers, is drawn as it comes
+                body = p_tr.pop("ismagnet", is_mag)
+                # a body that keeps its own color shows the magnetization as an
+                # arrow, as the parts of a disconnected mesh do
+                arrow_only = p_tr.pop("magnetization_mode", None) == "arrow"
+                if body and p_tr.get("type", "") == "mesh3d":
                     p_tr = update_magnet_mesh(
+                        input_obj,
+                        style,
                         p_tr,
-                        mag_style=style.magnetization,
-                        magnetization=input_obj.magnetization,
                         color_slicing=not supports_colorgradient,
+                        path_ind=path_ind,
+                        show_color=is_mag_color and not arrow_only,
                     )
-
+                    arrows |= is_mag_arrows or (
+                        arrow_only and bool(style.magnetization.show)
+                    )
                 traces_generic_temp.append(p_tr)
+            if arrows:  # one per object, however many parts its body has
+                tr_arrows = make_mag_arrows(input_obj, path_ind=path_ind)
+                if tr_arrows is not None:
+                    traces_generic_temp.insert(0, tr_arrows)
         return traces_generic_temp
 
-    traces_generic = []
-    if path_inds.size != 0:
-        if is_frame_dependent:
-            traces_generic.append(None)
-        else:
-            traces_generic.extend(get_traces_func())
-        extra_model3d_traces = (
-            style.model3d.data if style.model3d.data is not None else []
-        )
-        for extr in extra_model3d_traces:
-            if not extr.show:
-                continue
-            extr.update(extr.updatefunc())  # update before checking backend
-            if extr.backend == "generic":
-                extr.update(extr.updatefunc())
-                tr_non_generic = {"opacity": style.opacity}
-                ttype = extr.constructor.lower()
-                obj_extr_trace = extr.kwargs() if callable(extr.kwargs) else extr.kwargs
-                obj_extr_trace = {"type": ttype, **obj_extr_trace}
-                if ttype == "scatter3d":
-                    for k in ("marker", "line"):
-                        tr_non_generic[f"{k}_color"] = tr_non_generic.get(
-                            f"{k}_color", style.color
-                        )
-                elif ttype == "mesh3d":
-                    tr_non_generic["showscale"] = tr_non_generic.get("showscale", False)
-                    tr_non_generic["color"] = tr_non_generic.get("color", style.color)
-                else:  # pragma: no cover
-                    msg = (
-                        f"Unsupported extra model3d constructor {ttype!r}; "
-                        "only scatter3d and mesh3d are supported."
+    # None stands for traces rebuilt at every path index
+    traces_generic = [None] if is_frame_dependent else get_traces_func()
+    extra_model3d_traces = style.model3d.data
+    for extr in extra_model3d_traces:
+        if not extr.show:
+            continue
+        extr.update(extr.updatefunc())  # update before checking backend
+        if extr.backend == "generic":
+            tr_non_generic = {"opacity": style.opacity}
+            ttype = extr.constructor.lower()
+            obj_extr_trace = extr.kwargs() if callable(extr.kwargs) else extr.kwargs
+            obj_extr_trace = {"type": ttype, **obj_extr_trace}
+            if ttype == "scatter3d":
+                for k in ("marker", "line"):
+                    tr_non_generic[f"{k}_color"] = tr_non_generic.get(
+                        f"{k}_color", style.color
                     )
-                    raise ValueError(msg)
-                tr_non_generic.update(linearize_dict(obj_extr_trace, separator="_"))
-                traces_generic.append(tr_non_generic)
+            elif ttype == "mesh3d":
+                tr_non_generic["color"] = tr_non_generic.get("color", style.color)
+            else:  # pragma: no cover
+                msg = (
+                    f"Unsupported extra model3d constructor {ttype!r}; "
+                    "only scatter3d and mesh3d are supported."
+                )
+                raise ValueError(msg)
+            tr_non_generic.update(linearize_dict(obj_extr_trace, separator="_"))
+            traces_generic.append(tr_non_generic)
 
-    if is_mag_arrows:
-        mag = input_obj.magnetization
-        mag = np.array([0.0, 0.0, 0.0]) if mag is None else mag
-        if not np.all(mag == 0):
-            mag_arrow_tr = make_mag_arrows(input_obj)
-            traces_generic.append(mag_arrow_tr)
-
-    legend_label = get_legend_label(input_obj)
+    # the object's own label is needed only without a legend text, which
+    # otherwise names all its traces, the path's included
+    legend_label = legendtext or get_legend_label(input_obj)
+    # the pose at each drawn path index. Lazy access: _get_prop reads the
+    # stored value without materializing the full path. One stored
+    # orientation is applied as stored: indexing it builds a new Rotation per
+    # object, for bit-identical vertices.
+    poses = [
+        (
+            _get_prop(positions, path_ind),
+            orientations
+            if len(orientations) == 1
+            else _get_prop(orientations, path_ind),
+        )
+        for path_ind in path_inds
+    ]
     path_traces_generic = []
     for trg in traces_generic:
         temp_rot_traces = []
         name, name_suff = "", None
-        for ind, path_ind in enumerate(path_inds):
-            pos_orient_ind = min(path_ind, max_pos_ind)
-            pos, orient = positions[pos_orient_ind], orientations[pos_orient_ind]
-            tr_list = [trg]
-            if trg is None:
-                tr_list = get_traces_func(path_ind=path_ind)
-                tr_list = [tr_list] if isinstance(tr_list, dict) else tr_list
+        for ind, (path_ind, (pos, orient)) in enumerate(
+            zip(path_inds, poses, strict=True)
+        ):
+            tr_list = [trg] if trg is not None else get_traces_func(path_index=path_ind)
             for tr in tr_list:
                 if ind == 0:
                     name_suff = tr.pop("name_suffix", None)
@@ -610,15 +722,18 @@ def get_generic_traces3D(
                 temp_rot_traces.append(tr1)
         path_traces_generic.extend(group_traces(*temp_rot_traces))
 
-    if np.array(input_obj.position).ndim > 1 and style.path.show:
+    if input_obj._get_geometric_path_len() > 1 and style.path.show:
         scatter_path = make_path(input_obj, legend_label)
         path_traces_generic.append(scatter_path)
 
     path_traces_generic = group_traces(*path_traces_generic)
 
     for tr in path_traces_generic:
-        tr.update(place_and_orient_model3d(tr))
         tr.update(row=row, col=col)
+        # identity token: process-local and only valid while the object is
+        # alive, which is all an interactive viewer holding the same objects
+        # needs. Do not persist or transmit it.
+        tr["object_id"] = id(input_obj)
         if tr.get("opacity", None) is None:
             tr["opacity"] = style.opacity
         if tr.get("legendgroup", None) is None:
@@ -643,35 +758,48 @@ def get_generic_traces3D(
     out = {"generic": path_traces_generic}
 
     if extra_backend:
+        path_traces_extra_non_generic_backend = []
         for extr in extra_model3d_traces:
             if not extr.show:
                 continue
             extr.update(extr.updatefunc())  # update before checking backend
-            if extr.backend == extra_backend:
-                for path_ind in path_inds_minimal:
-                    tr_non_generic = {
-                        "model3d": extr,
-                        "position": positions[path_ind],
-                        "orientation": orientations[path_ind],
-                        "kwargs_extra": {
-                            "opacity": style.opacity,
-                            "color": style.color,
-                            "legendgroup": legendgroup,
-                            "showlegend": (
-                                showlegend
-                                if showlegend is not None
-                                else None
-                                if style.legend.show
-                                else False
-                            ),
-                            "name": legendtext or legend_label,
-                            "row": row,
-                            "col": col,
-                        },
-                    }
-                    tr_non_generic = process_extra_trace(tr_non_generic)
-                    path_traces_extra_non_generic_backend.append(tr_non_generic)
-        out.update({extra_backend: path_traces_extra_non_generic_backend})
+            if extr.backend != extra_backend:
+                continue
+            if not supports_native_traces:
+                warnings.warn(
+                    f"The {extra_backend} backend does not support "
+                    "backend-specific 3D models attached via "
+                    "style.model3d.data; the model is not displayed. Use a "
+                    "'generic' model3d trace instead, which every backend "
+                    "renders.",
+                    stacklevel=2,
+                )
+                continue
+            for path_ind in path_inds_minimal:
+                tr_non_generic = {
+                    "model3d": extr,
+                    "object_id": id(input_obj),
+                    "position": positions[path_ind],
+                    "orientation": orientations[path_ind],
+                    "kwargs_extra": {
+                        "opacity": style.opacity,
+                        "color": style.color,
+                        "legendgroup": legendgroup,
+                        "showlegend": (
+                            showlegend
+                            if showlegend is not None
+                            else None
+                            if style.legend.show
+                            else False
+                        ),
+                        "name": legend_label,
+                        "row": row,
+                        "col": col,
+                    },
+                }
+                tr_non_generic = process_extra_trace(tr_non_generic)
+                path_traces_extra_non_generic_backend.append(tr_non_generic)
+        out[extra_backend] = path_traces_extra_non_generic_backend
     return out
 
 
@@ -692,14 +820,18 @@ def clean_legendgroups(frames, clean_2d=False):
                     else:  # tr.legendgrouptitle.text is None:
                         tr["showlegend"] = False
                     legendgroups[lg]["traces"].append(tr)
-                    if tr_showlegend is None:
+                    # the first eligible trace stands in, the object's own
+                    # mesh, not its path line further down the group
+                    if tr_showlegend is None and legendgroups[lg]["backup"] is None:
                         legendgroups[lg]["backup"] = tr
-    # legends with showlegend
-    for lg in legendgroups.values():  # pragma: no cover
-        if lg["backup"] is not None and all(
-            tr["showlegend"] is False for tr in lg["traces"]
-        ):
-            lg["backup"]["showlegend"] = True
+        # a group whose first trace is never listed, such as a magnetization
+        # arrow, lists its backup instead -- in every frame: this ran once,
+        # after the loop, so only the last frame of an animation had them
+        for lg in legendgroups.values():
+            if lg["backup"] is not None and all(
+                tr["showlegend"] is False for tr in lg["traces"]
+            ):
+                lg["backup"]["showlegend"] = True
 
 
 def process_animation_kwargs(obj_list, animation=False, **kwargs):
@@ -713,9 +845,7 @@ def process_animation_kwargs(obj_list, animation=False, **kwargs):
         kwargs["animation_time"] = animation
         animation = True
     if (
-        not any(
-            getattr(obj, "position", np.array([])).ndim > 1 for obj in flat_obj_list
-        )
+        not any(obj._get_path_len() > 1 for obj in flat_obj_list)
         and animation is not False
     ):  # check if some path exist for any object
         animation = False
@@ -725,15 +855,21 @@ def process_animation_kwargs(obj_list, animation=False, **kwargs):
 
     # pylint: disable=no-member
     anim_def = default_settings.display.animation.copy()
-    anim_def.update({k[10:]: v for k, v in kwargs.items()}, _match_properties=False)
+    anim_def.update(
+        {
+            k[len("animation_") :]: v
+            for k, v in kwargs.items()
+            if k.startswith("animation_")
+        }
+    )
     animation_kwargs = {f"animation_{k}": v for k, v in anim_def.as_dict().items()}
 
-    path_indices, path_digits, frame_duration = [-1], 0, 0
+    path_indices, frame_duration = [-1], 0
     if animation:
-        path_indices, path_digits, frame_duration = extract_animation_properties(
+        path_indices, frame_duration = extract_animation_properties(
             obj_list_semi_flat, **animation_kwargs
         )
-    return animation, path_indices, path_digits, frame_duration, animation_kwargs
+    return animation, path_indices, frame_duration, animation_kwargs
 
 
 def extract_animation_properties(
@@ -754,10 +890,10 @@ def extract_animation_properties(
     for obj in objs:
         subobjs = [obj]
         if isinstance(obj, Collection):
-            subobjs.extend(obj.children)
-        for subobj in subobjs:
-            path_len = getattr(subobj, "_position", np.array((0.0, 0.0, 0.0))).shape[0]
-            path_lengths.append(path_len)
+            # all of them: a path in a nested collection was left out, and
+            # its animation came out empty
+            subobjs.extend(obj.children_all)
+        path_lengths.extend(subobj._get_path_len() for subobj in subobjs)
 
     max_pl = max(path_lengths)
     if animation_fps > animation_maxfps:
@@ -784,14 +920,6 @@ def extract_animation_properties(
             max_pl - 1
         )  # make sure the last frame is the last path position
 
-    # calculate exponent of last frame index to avoid digit shift in
-    # frame number display during animation
-    path_digits = (
-        np.log10(path_indices.max()).astype(int) + 1
-        if path_indices.ndim != 0 and path_indices.max() > 0
-        else 1
-    )
-
     frame_duration = int(animation_time * 1000 / path_indices.shape[0])
     new_fps = int(1000 / frame_duration)
     if max_pl > animation_maxframes:
@@ -803,10 +931,16 @@ def extract_animation_properties(
             stacklevel=2,
         )
 
-    return path_indices, path_digits, frame_duration
+    return path_indices, frame_duration
 
 
-def get_traces_3D(flat_objs_props, extra_backend=False, autosize=None, **kwargs):
+def get_traces_3D(
+    flat_objs_props,
+    extra_backend=False,
+    supports_native_traces=False,
+    autosize=None,
+    **kwargs,
+):
     """Return traces, traces to resize and extra_backend_traces"""
     extra_backend_traces = []
     traces_dict = {}
@@ -825,6 +959,7 @@ def get_traces_3D(flat_objs_props, extra_backend=False, autosize=None, **kwargs)
             out_traces = get_generic_traces3D(
                 obj,
                 extra_backend=extra_backend,
+                supports_native_traces=supports_native_traces,
                 autosize=autosize,
                 field_values=field_by_sens.get(obj, None),
                 **params,
@@ -835,21 +970,33 @@ def get_traces_3D(flat_objs_props, extra_backend=False, autosize=None, **kwargs)
     return traces_dict, extra_backend_traces
 
 
-def get_sensor_pixel_field(objects):
-    """get field_by_sens if sensor has style pixel field"""
+def get_sensor_pixel_field(objects, *, drawn_only=False):
+    """get field_by_sens if sensor has style pixel field
+
+    With `drawn_only`, only for the sensors whose pixels are drawn: a pixel
+    size of 0 shows no reading, and reading it anyway, over the whole path,
+    was most of the cost of drawing a scene whose backend draws its pixels
+    itself.
+    """
     # pylint: disable=import-outside-toplevel
     from magpylib._src.fields.field_BH import _getBH_level2  # noqa: PLC0415
 
     field_by_sens = {}
+    # `show(markers=...)` adds its markers to the panel's objects; they are
+    # neither sources nor sensors, and used to be refused as "bad sources"
+    objects = [o for o in objects if not isinstance(o, MagpyMarkers)]
     sensors = format_obj_input(objects, allow="sensors+collections")
-    sensors = [
+    # once each: a sensor shown with the collection holding it was read twice
+    sensors = dict.fromkeys(
         sub_s
         for s in sensors
         for sub_s in (s.sensors_all if isinstance(s, magpy.Collection) else [s])
-    ]
+    )
     has_pix_field = False
     for sens in sensors:
         fsrc = sens.style.pixel.field.source
+        if drawn_only and sens.style.pixel.size == 0:
+            continue
         if fsrc:
             field_by_sens[sens] = {}
             if not has_pix_field:
@@ -876,7 +1023,15 @@ def get_sensor_pixel_field(objects):
     return field_by_sens
 
 
-def draw_frame(objs, *, rc_params, style_kwargs, **kwargs):
+def draw_frame(
+    objs,
+    *,
+    rc_params,
+    style_kwargs,
+    merge_traces=True,
+    supports_native_traces=False,
+    **kwargs,
+):
     """
     Creates traces from input ``objs`` and provided parameters, updates the size of objects like
     Sensors and Dipoles in ``kwargs`` depending on the canvas size.
@@ -901,7 +1056,11 @@ def draw_frame(objs, *, rc_params, style_kwargs, **kwargs):
     rc_keys = ("row", "col")
     kwargs.update({k: v for k, v in objs["rc_params"].items() if k in rc_keys})
     if objs["rc_params"]["output"] == "model3d":
-        traces_d1, traces_ex1 = get_traces_3D(objs["objects"], **kwargs)
+        traces_d1, traces_ex1 = get_traces_3D(
+            objs["objects"],
+            supports_native_traces=supports_native_traces,
+            **kwargs,
+        )
         rc_params["autosize"] = rc_params.get("autosize", None)
         if rc_params["autosize"] is None:
             # get the dipoles and sensors autosize from first frame
@@ -917,22 +1076,41 @@ def draw_frame(objs, *, rc_params, style_kwargs, **kwargs):
             k: v for k, v in objs["objects"].items() if k in to_resize_keys
         }
         traces_d2, traces_ex2 = get_traces_3D(
-            flat_objs_props, autosize=rc_params["autosize"], **kwargs
+            flat_objs_props,
+            autosize=rc_params["autosize"],
+            supports_native_traces=supports_native_traces,
+            **kwargs,
         )
         traces_dict.update({**traces_d1, **traces_d2})
         extra_backend_traces.extend([*traces_ex1, *traces_ex2])
-    traces = group_traces(*[t for tr in traces_dict.values() for t in tr])
+    flat_traces = [t for tr in traces_dict.values() for t in tr]
+    # the only *cross-object* merge. Backends that want per-object geometry --
+    # picking, drag gizmos, pyvista actor naming -- declare merge_traces=False
+    # and get one trace set per object instead. The four other group_traces
+    # calls merge within a single object and stay unconditional.
+    traces = group_traces(*flat_traces) if merge_traces else flat_traces
 
     if objs["rc_params"]["output"] != "model3d":
         traces2d = get_traces_2D(
             *objs["objects"],
+            legend_show=objs.get("legend_show"),
             **objs["rc_params"],
         )
         traces.extend(traces2d)
     return traces, extra_backend_traces, rc_params
 
 
-def get_frames(objs, *, title, supports_colorgradient, backend, **kwargs):
+def get_frames(
+    objs,
+    *,
+    title,
+    supports_colorgradient,
+    backend,
+    merge_traces=True,
+    draws_pixels=False,
+    supports_native_traces=False,
+    **kwargs,
+):
     """This is a helper function which generates frames with generic traces to be provided to
     the chosen backend. According to a certain zoom level, all three space direction will be equal
     and match the maximum of the ranges needed to display all objects, including their paths.
@@ -941,42 +1119,59 @@ def get_frames(objs, *, title, supports_colorgradient, backend, **kwargs):
     # process all kwargs
     # pylint: disable=no-member
     colorsequence = kwargs.pop("colorsequence", default_settings.display.colorsequence)
+    legend_maxitems = kwargs.pop(
+        "legend_maxitems", default_settings.display.legend.maxitems
+    )
+    check_input_legend_maxitems(legend_maxitems)
 
     # extract style info
     style_kwargs = {k: v for k, v in kwargs.items() if k.startswith("style")}
     style_kwargs = linearize_dict(style_kwargs, separator="_")
     kwargs = {k: v for k, v in kwargs.items() if not k.startswith("style")}
 
-    # extract animation info
+    # extract animation info; a misspelled animation_* is left to the check
+    # below, as a misspelled units_* is
+    known = {
+        "animation",
+        *(f"animation_{k}" for k in default_settings.display.animation.as_dict()),
+    }
     (
         is_animation,
         path_indices,
-        path_digits,
         frame_duration,
         animation_kwargs,
-    ) = process_animation_kwargs([o for obj in objs for o in obj["objects"]], **kwargs)
-    kwargs = {k: v for k, v in kwargs.items() if not k.startswith("animation")}
+    ) = process_animation_kwargs(
+        [o for obj in objs for o in obj["objects"]],
+        **{k: v for k, v in kwargs.items() if k in known},
+    )
+    kwargs = {k: v for k, v in kwargs.items() if k not in known}
 
     if kwargs:
         msg = f"show() got unexpected keyword argument(s) {kwargs!r}"
         raise TypeError(msg)
 
-    # infer title if necessary
-    if objs:
-        style = objs[0]["objects"][0].style
-        label = getattr(style, "label", None)
-        title = label if len(objs[0]["objects"]) == 1 else None
-    else:
-        title = "No objects to be displayed"
+    # only infer when the caller gave no title; an explicit one always wins
+    if title is None:
+        if not objs:
+            title = "No objects to be displayed"
+        elif len(objs[0]["objects"]) == 1:
+            title = getattr(objs[0]["objects"][0].style, "label", None)
 
     objs_rc = get_objects_props_by_row_col(
         *objs,
         colorsequence=colorsequence,
         style_kwargs=style_kwargs,
     )
+    # each cell's objects as the caller gave them, collections unflattened,
+    # for `Panel.objects`
+    given_rc = {}
+    for obj in objs:
+        given = given_rc.setdefault((obj["row"], obj["col"]), {})
+        for o in obj["objects"]:
+            if not isinstance(o, MagpyMarkers):
+                given.setdefault(id(o), o)
     # create frame for each path index or downsampled path index
     style_kwargs = {}
-    title_str = title
     frames = [
         {
             "name": str(path_ind + 1),
@@ -986,27 +1181,32 @@ def get_frames(objs, *, title, supports_colorgradient, backend, **kwargs):
         }
         for path_ind in path_indices
     ]
-    for props in objs_rc.values():
+    autosize_rc = {}
+    for rc, props in objs_rc.items():
         styles = {obj: prop["style"] for obj, prop in props["objects"].items()}
         rc_params = None
         with style_temp_edit(*styles, styles_temp=styles):
-            field_by_sens = get_sensor_pixel_field(list(props["objects"]))
+            field_by_sens = get_sensor_pixel_field(
+                list(props["objects"]), drawn_only=True
+            )
             for frame, path_ind in zip(frames, path_indices, strict=False):
                 if is_animation:
                     style_kwargs["style_path_frames"] = [path_ind]
-                    title = "Animation 3D - " if title is None else title
-                    title_str = f"""{title}path index: {path_ind + 1:0{path_digits}d}"""
                 traces, extra_backend_traces, rc_params = draw_frame(
                     props,
                     field_by_sens=field_by_sens,
                     rc_params=rc_params,
                     supports_colorgradient=supports_colorgradient,
+                    merge_traces=merge_traces,
+                    draws_pixels=draws_pixels,
+                    supports_native_traces=supports_native_traces,
                     extra_backend=backend,
                     style_kwargs=style_kwargs,
                 )
                 frame["data"].extend(traces)
                 frame["extra_backend_traces"].extend(extra_backend_traces)
-                frame["layout"] = {"title": title_str}
+        autosize_rc[rc] = (rc_params or {}).get("autosize")
+
     clean_legendgroups(frames)
     all_traces = [
         t
@@ -1015,7 +1215,9 @@ def get_frames(objs, *, title, supports_colorgradient, backend, **kwargs):
     ]
     zoom = {rc: v["rc_params"]["zoom"] for rc, v in objs_rc.items()}
     ranges_rc = get_scene_ranges(*all_traces, zoom=zoom)
-    labels_rc = {(1, 1): dict.fromkeys("xyz", "")}
+    # an empty show() still gets its one panel; an empty cell of a grid gets
+    # none, as `Scene.panel` promises
+    labels_rc = {} if objs_rc else {(1, 1): dict.fromkeys("xyz", "")}
     scale_factors_rc = {}
     for rc, props in objs_rc.items():
         params = props["rc_params"]
@@ -1032,17 +1234,56 @@ def get_frames(objs, *, title, supports_colorgradient, backend, **kwargs):
         for key in ("data", "extra_backend_traces"):
             frame[key] = rescale_traces(frame[key], factors=scale_factors_rc)
 
-    out = {
-        "frames": frames,
-        "ranges": ranges_rc,
-        "labels": labels_rc,
-        "input_kwargs": {**kwargs, **animation_kwargs},
-    }
-    if is_animation:
-        out.update(
-            {
-                "frame_duration": frame_duration,
-                "path_indices": path_indices,
-            }
+    # assemble the public Scene. The mutable dict accumulation above stays
+    # internal; only the envelope is typed, traces remain dicts in magpylib's
+    # dialect -- see magpylib._src.display.api.
+    panels = []
+    for rc in sorted(set(ranges_rc) | set(labels_rc) | set(objs_rc)):
+        props = objs_rc.get(rc)
+        output = props["rc_params"].get("output", "model3d") if props else "model3d"
+        is_3d = output == "model3d"
+        rng = ranges_rc.get(rc)
+        if is_3d:
+            labels = dict(labels_rc.get(rc, {}))
+        else:
+            # a 2D panel plots its outputs, in one unit, over the path index;
+            # its 3D range and x/y/z labels describe nothing a chart can use
+            outputs, unit = parse_2d_output(output)
+            names = ", ".join(out for out, _, _ in outputs)
+            labels = {"x": "path index", "y": f"{names} ({unit})"}
+        panels.append(
+            Panel(
+                row=rc[0],
+                col=rc[1],
+                kind="scene3d" if is_3d else "chart2d",
+                ranges=np.asarray(rng) if (is_3d and rng is not None) else None,
+                autosize=autosize_rc.get(rc) if is_3d else None,
+                labels=labels,
+                objects=tuple(given_rc.get(rc, {}).values()),
+            )
         )
-    return out
+
+    # process_animation_kwargs resolves every animation_* key from the defaults
+    animation = AnimationSettings(
+        fps=animation_kwargs["animation_fps"],
+        time=float(animation_kwargs["animation_time"]),
+        slider=animation_kwargs["animation_slider"],
+        output=animation_kwargs["animation_output"],
+        frame_duration=frame_duration if is_animation else None,
+        path_indices=tuple(int(i) for i in path_indices) if is_animation else (),
+    )
+
+    return Scene(
+        title=title,
+        panels=tuple(panels),
+        frames=tuple(
+            Frame(
+                label=fr["name"],
+                traces=tuple(fr["data"]),
+                native_traces=tuple(fr["extra_backend_traces"]),
+            )
+            for fr in frames
+        ),
+        animation=animation,
+        legend_maxitems=legend_maxitems,
+    )

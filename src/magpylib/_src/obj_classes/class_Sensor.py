@@ -8,14 +8,13 @@ import numpy as np
 from magpylib._src.display.traces_core import make_Sensor
 from magpylib._src.exceptions import MagpylibBadUserInput
 from magpylib._src.fields.field_BH import _getBH_level2
-from magpylib._src.input_checks import check_format_input_vector
-from magpylib._src.obj_classes.class_BaseDisplayRepr import BaseDisplayRepr
+from magpylib._src.input_checks import check_format_input_numeric
 from magpylib._src.obj_classes.class_BaseGeo import BaseGeo
 from magpylib._src.style import SensorStyle
 from magpylib._src.utility import format_star_input
 
 
-class Sensor(BaseGeo, BaseDisplayRepr):
+class Sensor(BaseGeo):
     """Magnetic field sensor.
 
     Can be used as ``observers`` input for magnetic field computation.
@@ -52,10 +51,10 @@ class Sensor(BaseGeo, BaseDisplayRepr):
         Same as constructor parameter ``pixel``.
     handedness : str
         Same as constructor parameter ``handedness``.
-    parent : Collection | None
+    parent : None | Collection
         Parent collection of the object.
-    style : dict
-        Style dictionary defining visual properties.
+    style : SensorStyle
+        Object style. See SensorStyle for details.
 
     Examples
     --------
@@ -93,6 +92,7 @@ class Sensor(BaseGeo, BaseDisplayRepr):
     """
 
     _style_class = SensorStyle
+    _style_family = ("sensor",)
     _autosize = True
     get_trace = make_Sensor
 
@@ -109,9 +109,7 @@ class Sensor(BaseGeo, BaseDisplayRepr):
         self.pixel = pixel
         self.handedness = handedness
 
-        # init inheritance
         BaseGeo.__init__(self, position, orientation, style=style, **kwargs)
-        BaseDisplayRepr.__init__(self)
 
     # Properties
     @property
@@ -128,12 +126,11 @@ class Sensor(BaseGeo, BaseDisplayRepr):
         pix : None | array-like, shape (3,) or (o1, o2, ..., 3)
             Sensor pixel positions in local object coordinates in units (m).
         """
-        self._pixel = check_format_input_vector(
+        self._pixel = check_format_input_numeric(
             pix,
-            dims=range(1, 20),
-            shape_m1=3,
-            sig_name="pixel",
-            sig_type="array-like (list, tuple, ndarray) with shape (o1, o2, ..., 3) or None",
+            dtype=float,
+            shapes=((..., 3),),
+            name="pixel",
             allow_None=True,
         )
 
@@ -471,9 +468,15 @@ class Sensor(BaseGeo, BaseDisplayRepr):
             in_out=in_out,
         )
 
-    def _get_centroid(self):
-        """Centroid of object in units (m)."""
-        if self.pixel is not None:
-            pixel_mean = np.mean(self.pixel.reshape(-1, 3), axis=0)
-            return self.position + pixel_mean
-        return self.position
+    def _get_centroid(self, squeeze=True):
+        """Centroid of object in units (m): the mean of its pixels, which are
+        local coordinates and turn with the sensor."""
+        pixel_mean = (
+            np.zeros(3)
+            if self._pixel is None
+            else np.mean(np.reshape(self._pixel, (-1, 3)), axis=0)
+        )
+        result = self._orientation.apply(pixel_mean) + self._position
+        if squeeze and len(result) == 1:
+            return result[0]
+        return result

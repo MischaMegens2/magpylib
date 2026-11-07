@@ -10,6 +10,8 @@ on:
     types:
       - published
 
+permissions: {}
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -23,13 +25,31 @@ jobs:
   dist:
     name: Distribution build
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
+          persist-credentials: false
           fetch-depth: 0
 
-      - uses: hynek/build-and-inspect-python-package@v2
+      # Pinned to a full version on purpose: v3 stopped force-tagging `@v3`
+      # and `@v3.0`, so there is no moving tag to follow. Dependabot bumps it.
+      # It has to be v3 at least -- v2 pins Twine 6.2, which rejects the
+      # Metadata-Version 2.5 that hatchling now writes, failing every build.
+      - uses: hynek/build-and-inspect-python-package@v3.0.2
+        id: baipp
+
+      # The Agent Skill is package data in a dot-directory; check that both
+      # distributions carry every file of it.
+      - name: Check the Agent Skill ships
+        env:
+          DIST: ${{ steps.baipp.outputs.dist }}
+        run: |
+          expected=$(cd src && find magpylib/.agents -type f | sort)
+          diff <(echo "$expected") <(unzip -Z1 "$DIST"/*.whl | grep '^magpylib/\.agents/' | sort)
+          diff <(echo "$expected") <(tar -tzf "$DIST"/*.tar.gz | grep -o 'magpylib/\.agents/.*[^/]$' | sort)
 
   publish:
     needs: [dist]
@@ -49,7 +69,7 @@ jobs:
           path: dist
 
       - name: Generate artifact attestation for sdist and wheel
-        uses: actions/attest-build-provenance@v4.1.0
+        uses: actions/attest@v4
         with:
           subject-path: "dist/*"
 

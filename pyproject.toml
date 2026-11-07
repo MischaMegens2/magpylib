@@ -18,7 +18,7 @@ license = "BSD-3-Clause"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
 classifiers = [
-  "Development Status :: 1 - Planning",
+  "Development Status :: 5 - Production/Stable",
   "Intended Audience :: Science/Research",
   "Intended Audience :: Developers",
   "Operating System :: OS Independent",
@@ -35,7 +35,7 @@ classifiers = [
 dynamic = ["version"]
 dependencies = [
     "numpy>=1.23",
-    "scipy>=1.17",
+    "scipy>=1.17.1",
     "matplotlib>=3.6",
     "plotly>=5.16",
 ]
@@ -53,6 +53,7 @@ test = [
   "pytest-cov >=7",
   "pandas",
   "pyvista",
+  "vtk !=9.7.2", # no macOS arm64 wheel; drop once it has one
   "imageio[tifffile,ffmpeg]",
   "jupyterlab",
   "ipywidgets",  # for FigureWidget (plotly v5)
@@ -63,22 +64,30 @@ dev = [
   { include-group = "test" },
 ]
 
+lint = [
+  # Pinned, and the only pins here: a release of either changes what pylint
+  # reports, and that should land as a bump of these two lines, not as a red
+  # check on every open PR. uv.lock is not committed, so nothing else holds them.
+  "pylint ==4.1.3",
+  "astroid ==4.3.4",
+]
+
 docs = [
   "pydata-sphinx-theme",
-  "sphinx>=7.0,<8.0",
+  "sphinx >=8.2", # pydata-sphinx-theme 0.20 dropped sphinx <=8.1
   "sphinx-design",
-  "sphinx-thebe",
   "sphinx-favicon",
-  "sphinx-gallery",
   "sphinx-copybutton",
   "myst-nb",
   "pandas",
   "numpy-stl",
-  "pyvista",
+  "pyvista[jupyter] >=0.48", # trame ships the scene exporter and the viewer
+  "vtk !=9.7.2", # no macOS arm64 wheel; drop once it has one
   "magpylib-material-response",
-  "plotly>=5.16,<6.0", # see https://github.com/executablebooks/myst-nb/issues/667
-  "kaleido==0.2.1", # ulterior versions don't ship chrome,
+  "plotly>=7.0", # see https://github.com/executablebooks/myst-nb/issues/667
+  "kaleido>=1", # 1.x uses a system Chrome or downloads one on first use
   "sphinxcontrib-bibtex>=2.6",
+  "sphinx-notfound-page",
 ]
 
 binder = [
@@ -106,6 +115,9 @@ addopts = ["-ra", "--showlocals"]
 strict = true
 filterwarnings = [
   "error",
+  # vtk's numpy_support is not NumPy 2.5 compatible (uses `arr.shape = ...`);
+  # remove once VTK ships a fix (surfaces through pyvista)
+  "ignore:Setting the shape on a NumPy array has been deprecated:DeprecationWarning",
 ]
 log_level = "INFO"
 testpaths = [
@@ -143,16 +155,11 @@ show-fixes = true
 extend-select = [
   "ARG",    # flake8-unused-arguments
   "B",      # flake8-bugbear
-  "BLE",    # flake8-blind-except
   "C4",     # flake8-comprehensions
-  "DTZ",    # flake8-datetimez
   "EM",     # flake8-errmsg
   "EXE",    # flake8-executable
-  "FA",     # flake8-future-annotations
-  "FLY",    # flynt
   "FURB",   # refurb
   "G",      # flake8-logging-format
-  "I",      # isort
   "ICN",    # flake8-import-conventions
   "ISC",    # flake8-implicit-str-concat
   "LOG",    # flake8-logging
@@ -160,7 +167,6 @@ extend-select = [
   "PD",     # pandas-vet
   "PERF",   # perflint
   "PGH",    # pygrep-hooks
-  "PIE",    # flake8-pie
   "PL",     # pylint
   "PT",     # flake8-pytest-style
   "PTH",    # flake8-use-pathlib
@@ -176,11 +182,15 @@ extend-select = [
   "TC",     # flake8-type-checking
   "TRY",    # tryceratops
   "UP",     # pyupgrade
-  "YTT",    # flake8-2020
 ]
 ignore = [
   "PLR09",    # Too many <...>
   "PLR2004",  # Magic value used in comparison
+  # Module names here carry physics and API shape: field_BH_cuboid,
+  # class_Cuboid, test_BHMJ_level. B, H, M and J *are* the fields, and
+  # lowercasing them would make 57 file names say something else. Reported
+  # since ruff 0.16 began applying N999 to these paths.
+  "N999",     # Invalid module name
 ]
 # Uncomment if using a _compat.typing backport
 # typing-modules = ["magpylib._compat.typing"]
@@ -210,3 +220,4 @@ messages_control.disable = [
 
 [tool.codespell]
 skip = 'src/magpylib/_src/fields/special_el3.py'
+ignore-words-list = 'astroid' # pylint's parser, not the rock

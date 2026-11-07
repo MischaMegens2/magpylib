@@ -24,16 +24,6 @@ def test_TriangularMesh_repr():
     assert repr(trimesh).startswith("TriangularMesh"), "TriangularMesh repr failed"
 
 
-def test_TriangularMesh_barycenter():
-    """test TriangularMesh barycenter"""
-    pol = (0, 0, 333)
-    trimesh = magpy.magnet.TriangularMesh.from_pyvista(
-        polarization=pol, polydata=pv.Octahedron()
-    ).move((1, 2, 3))
-    bary = np.array([1, 2, 3])
-    np.testing.assert_allclose(trimesh.barycenter, bary)
-
-
 def test_TriangularMesh_getBH():
     """Compare meshed cube to magpylib cube"""
     dimension = (1, 1, 1)
@@ -158,6 +148,52 @@ def test_magnet_trimesh_func():
     )[0]
     np.testing.assert_allclose(B0, B1)
     np.testing.assert_allclose(B0, B2)
+
+
+def _tetrahedron(x0, unused_vertex=False):
+    vertices = [(x0, 0, 0), (x0 + 1, 0, 0), (x0, 1, 0), (x0, 0, 1)]
+    return magpy.magnet.TriangularMesh(
+        vertices=vertices + [(9, 9, 9)] * unused_vertex,
+        faces=[(0, 2, 1), (0, 1, 3), (0, 3, 2), (1, 2, 3)],
+        polarization=(0, 0, 1),
+    )
+
+
+def _cube(x0):
+    return magpy.magnet.TriangularMesh.from_pyvista(
+        polarization=(0, 0, 1), polydata=pv.Cube(center=(x0, 0, 0))
+    )
+
+
+TWO_MESHES = {  # two different meshes, and a point inside each
+    "equal face counts": lambda: ([_cube(0), _cube(2)], [(0, 0, 0), (2, 0, 0)]),
+    "different face counts": lambda: (
+        [_tetrahedron(0), _cube(2)],
+        [(0.2, 0.2, 0.2), (2, 0, 0)],
+    ),
+    "equal face counts, different vertex counts": lambda: (
+        [_tetrahedron(0), _tetrahedron(2, unused_vertex=True)],
+        [(0.2, 0.2, 0.2), (2.2, 0.2, 0.2)],
+    ),
+}
+
+
+@pytest.mark.parametrize("pair", TWO_MESHES)
+@pytest.mark.parametrize("inside", [0, 1], ids=["inside_first", "inside_last"])
+def test_TriangularMesh_inside_last_of_several_meshes(pair, inside):
+    """The last of several different meshes on one observer is tested against
+    its own mesh, not the one before it."""
+    meshes, points = TWO_MESHES[pair]()
+    for get in (magpy.getB, magpy.getJ):
+        together = get(meshes, points[inside])
+        alone = [get(mesh, points[inside]) for mesh in meshes]
+        np.testing.assert_allclose(together, alone)
+
+
+def test_TriangularMesh_no_observers():
+    """A sensor without pixels gives an empty field, as for other magnets."""
+    sensor = magpy.Sensor(pixel=np.zeros((0, 3)))
+    assert magpy.getB(_cube(0), sensor).shape == (0, 3)
 
 
 def test_bad_triangle_indices():
@@ -357,12 +393,12 @@ def test_TriangularMesh_from_faces_bad_inputs():
 
     # bad shape input
     msh = [((0, 0), (1, 0), (0, 1))] * 2
-    with pytest.raises(ValueError, match="Input mesh must have"):
+    with pytest.raises(MagpylibBadUserInput, match="Input mesh must be of shape"):
         get_tri_from_mesh(msh)
 
     # bad shape input
     msh = [((0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1))] * 2
-    with pytest.raises(ValueError, match="Input mesh must have"):
+    with pytest.raises(MagpylibBadUserInput, match="Input mesh must be of shape"):
         get_tri_from_mesh(msh)
 
 
@@ -378,13 +414,14 @@ def test_TriangularMesh_from_faces_good_inputs():
     pos_ori = {"orientation": tetra.orientation, "position": tetra.position}
 
     tmesh1 = magpy.magnet.TriangularMesh.from_ConvexHull(
-        polarization=pol, points=tetra.vertices, **pos_ori
+        polarization=pol, points=tetra._vertices[0], **pos_ori
     )
 
     # from triangle list
-    trias = [
-        magpy.misc.Triangle(polarization=pol, vertices=face) for face in tmesh1.mesh
-    ]
+    mesh = tmesh1.mesh
+    if mesh.ndim == 4:
+        mesh = mesh[0]
+    trias = [magpy.misc.Triangle(polarization=pol, vertices=face) for face in mesh]
     tmesh2 = magpy.magnet.TriangularMesh.from_triangles(
         polarization=pol, triangles=trias, **pos_ori
     )
@@ -523,11 +560,33 @@ def test_TriangularMesh_volume_complex():
 
 
 def test_TriangularMesh_centroid():
-    """Test TriangularMesh centroid - should return barycenter if available"""
+    """test TriangularMesh centroid"""
+    pol = (0, 0, 333)
+    trimesh = magpy.magnet.TriangularMesh.from_pyvista(
+        polarization=pol, polydata=pv.Octahedron()
+    ).move((1, 2, 3))
+    centroid = np.array([1, 2, 3])
+    np.testing.assert_allclose(trimesh.centroid, centroid)
+
+
+def test_TriangularMesh_centroid2():
+    """Test TriangularMesh centroid - should return centroid if available"""
     vertices = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]])
     faces = np.array([[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]])
     tri_mesh = magpy.magnet.TriangularMesh(
         vertices=vertices, faces=faces, polarization=(0, 0, 1), position=(6, 7, 8)
     )
-    expected = [6.26289171, 7.26289171, 8.26289171]  # barycenter offset from position
+    expected = [6.26289171, 7.26289171, 8.26289171]  # centroid offset from position
     assert np.allclose(tri_mesh.centroid, expected)
+
+
+def test_faces_change_forgets_the_mesh_checks():
+    """Dropping a face from a closed mesh makes it open, cache or not."""
+    verts = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)]
+    faces = [(0, 2, 1), (0, 1, 3), (0, 3, 2), (1, 2, 3)]
+    mesh = magpy.magnet.TriangularMesh(
+        vertices=verts, faces=faces, polarization=(0, 0, 1)
+    )
+    assert mesh.check_open() is False
+    mesh.faces = faces[:3]
+    assert mesh.check_open(mode="ignore") is True

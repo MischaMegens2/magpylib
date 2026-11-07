@@ -14,6 +14,14 @@
 :img-bottom: ../../../_static/images/examples_icon_tutorial_paths.png
 :::
 
+:::{grid-item-card} {ref}`examples-tutorial-path-properties`
+:text-align: center
+:link: examples-tutorial-path-properties
+:link-type: ref
+:link-alt: link to example
+:img-bottom: ../../../_static/images/examples_icon_tutorial_paths.png
+:::
+
 :::{grid-item-card} {ref}`examples-tutorial-field-computation`
 :text-align: center
 :link: examples-tutorial-field-computation
@@ -302,6 +310,7 @@
 :hidden:
 
 examples_tutorial_paths.md
+examples_tutorial_path_properties.md
 examples_tutorial_field_computation.md
 examples_tutorial_collection.md
 examples_tutorial_custom.md
@@ -319,15 +328,19 @@ examples_shapes_convex_hull.md
 examples_shapes_triangle.md
 examples_shapes_pyvista.md
 examples_shapes_cad.md
+examples_shapes_current_sheet.md
 
 examples_misc_compound.md
 examples_misc_field_interpolation.md
 examples_misc_inhom.md
+examples_misc_equivalent.md
+examples_misc_image_method.md
 
 examples_app_end_of_shaft.md
 examples_app_halbach.md
 examples_app_coils.md
 examples_app_scales.md
+examples_app_pcb.md
 
 examples_force_intro.md
 examples_force_physics.md

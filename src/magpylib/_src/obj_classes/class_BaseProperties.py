@@ -5,6 +5,7 @@ Dipole moment is a separate class from BaseMagnet because this property is inher
 Volume is a separate class from BaseMagnet because Dipole has no volume property
 """
 
+import warnings
 from abc import ABC, abstractmethod
 
 
@@ -13,8 +14,14 @@ class BaseDipoleMoment(ABC):
 
     @property
     def dipole_moment(self):
-        """Return dipole moment vector (A·m²)."""
-        return self._get_dipole_moment()
+        """Return dipole moment vector (A·m²) in the object's own frame, like its
+        polarization; a Collection's is in the Collection's own frame."""
+        return self._get_dipole_moment(squeeze=True)
+
+    @property
+    def _dipole_moment(self):
+        """Return dipole moment vector (A·m²) without squeezing (internal)."""
+        return self._get_dipole_moment(squeeze=False)
 
     @dipole_moment.setter
     def dipole_moment(self, _input):
@@ -22,8 +29,14 @@ class BaseDipoleMoment(ABC):
         msg = "Cannot set property dipole_moment. It is read-only."
         raise AttributeError(msg)
 
+    @_dipole_moment.setter
+    def _dipole_moment(self, _input):
+        """Raise error on attempt to set read-only dipole moment."""
+        msg = "Cannot set property _dipole_moment. It is read-only."
+        raise AttributeError(msg)
+
     @abstractmethod
-    def _get_dipole_moment(self):
+    def _get_dipole_moment(self, squeeze=True):
         """Return computed dipole moment (A·m²).
 
         Returns
@@ -56,3 +69,24 @@ class BaseVolume(ABC):
         float
             Volume in units (m³).
         """
+
+
+class BaseBarycenter:
+    """Deprecated ``barycenter`` alias of ``centroid``, on the classes that had it
+    before version 6."""
+
+    @property
+    def barycenter(self):
+        """Return barycenter (m).
+
+        .. deprecated:: 6.0.0
+            Use :attr:`centroid` instead. The ``barycenter`` property will be removed
+            in a future version.
+        """
+        warnings.warn(
+            "The 'barycenter' property is deprecated and will be removed in a future "
+            "version. Use 'centroid' instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.centroid  # pylint: disable=no-member  # mixed into BaseGeo classes

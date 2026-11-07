@@ -5,6 +5,7 @@ import pytest
 from scipy.spatial.transform import Rotation as R
 
 import magpylib as magpy
+from magpylib._src.exceptions import MagpylibBadUserInput
 
 # pylint: disable=no-member
 
@@ -636,16 +637,17 @@ def test_describe_with_label():
     # describe string
     test = [
         "Cuboid(id=2743358534352, label='x1')",
+        "  • path length: 1",
         "  • parent: None",
-        "  • position: [0. 0. 0.] m",
-        "  • orientation: [0. 0. 0.] deg",
-        "  • dimension: None m",
-        "  • magnetization: None A/m",
-        "  • polarization: None T",
+        "  • path properties: ",
+        "    • polarization: None T",
+        "    • magnetization: None A/m",
+        "    • position: [0. 0. 0.] m",
+        "    • orientation: [0. 0. 0.] deg",
+        "    • dimension: None m",
+        "  • volume: 0 m³",
         "  • centroid: [0. 0. 0.]",
         "  • dipole_moment: [0. 0. 0.]",
-        "  • meshing: None",
-        "  • volume: 0.0",
     ]
     match_string_up_to_id(test, x.describe(return_string=True))
 
@@ -661,16 +663,17 @@ def test_describe_with_parent():
     magpy.Collection(x)  # add parent
     test = [
         "Cuboid(id=1687262797456, label='x1')",
+        "  • path length: 1",
         "  • parent: Collection(id=1687262859280)",
-        "  • position: [0. 0. 0.] m",
-        "  • orientation: [0. 0. 0.] deg",
-        "  • dimension: None m",
-        "  • magnetization: None A/m",
-        "  • polarization: None T",
+        "  • path properties: ",
+        "    • polarization: None T",
+        "    • magnetization: None A/m",
+        "    • position: [0. 0. 0.] m",
+        "    • orientation: [0. 0. 0.] deg",
+        "    • dimension: None m",
+        "  • volume: 0 m³",
         "  • centroid: [0. 0. 0.]",
         "  • dipole_moment: [0. 0. 0.]",
-        "  • meshing: None",
-        "  • volume: 0.0",
     ]
     match_string_up_to_id(test, x.describe(return_string=True))
 
@@ -681,11 +684,12 @@ def test_describe_with_path():
     x = magpy.Sensor(position=[(1, 2, 3)] * 3)
     test = [
         "Sensor(id=2743359152656)",
-        "  • parent: None",
         "  • path length: 3",
-        "  • position (last): [1. 2. 3.] m",
-        "  • orientation (last): [0. 0. 0.] deg",
-        "  • centroid: shape(3, 3)",
+        "  • parent: None",
+        "  • path properties: ",
+        "    • position: [1. 2. 3.] m",
+        "    • orientation: [0. 0. 0.] deg",
+        "  • centroid: [[1. 2. 3.]  [1. 2. 3.]  [1. 2. 3.]]",
         "  • handedness: right",
         "  • pixel: None",
     ]
@@ -698,22 +702,26 @@ def test_describe_with_exclude_None():
     x = magpy.Sensor()
     test = [
         "Sensor(id=140534160166976)",
+        "  • path length: 1",
         "  • parent: None",
-        "  • position: [0. 0. 0.] m",
-        "  • orientation: [0. 0. 0.] deg",
+        "  • path properties: ",
+        "    • position: [0. 0. 0.] m",
+        "    • orientation: [0. 0. 0.] deg",
         "  • centroid: [0. 0. 0.]",
         "  • handedness: right",
         "  • pixel: None",
         (
-            "  • style: SensorStyle(arrows=ArrowCS(x=ArrowSingle(color=None, show=True),"
-            " y=ArrowSingle(color=None, show=True), z=ArrowSingle(color=None, show=True)),"
-            " color=None, description=Description(show=None, text=None), label=None,"
-            " legend=Legend(show=None, text=None), model3d=Model3d(data=[], showdefault=True),"
-            " opacity=None, path=Path(frames=None, line=Line(color=None, style=None, width=None),"
-            " marker=Marker(color=None, size=None, symbol=None), numbering=None, show=None),"
-            " pixel=Pixel(color=None, field=PixelField(colormap=None, colorscaling=None, shownull=None,"
-            " sizemin=None, sizescaling=None, source=None, symbol=None), size=1,"
-            " sizemode=None, symbol=None), size=None, sizemode=None)"
+            "  • style: SensorStyle(size=None, sizemode=None,"
+            " pixel=Pixel(size=1, sizemode=None, color=None, symbol=None,"
+            " field=PixelField(source=None, colormap=None, shownull=None, symbol=None,"
+            " sizescaling=None, sizemin=None, colorscaling=None)),"
+            " arrows=ArrowCS(x=ArrowSingle(show=True, color=None),"
+            " y=ArrowSingle(show=True, color=None), z=ArrowSingle(show=True, color=None)),"
+            " label=None, description=Description(text=None, show=None),"
+            " legend=Legend(text=None, show=None), color=None, opacity=None,"
+            " path=Path(show=None, marker=Marker(size=None, color=None, symbol=None),"
+            " line=Line(style=None, color=None, width=None), frames=None, numbering=None),"
+            " model3d=Model3d(showdefault=True, data=()))"
         ),
     ]
     match_string_up_to_id(test, x.describe(exclude=None, return_string=True))
@@ -725,9 +733,11 @@ def test_describe_with_many_pixels():
     x = magpy.Sensor(pixel=[[[(1, 2, 3)] * 5] * 5] * 3, handedness="left")
     test = [
         "Sensor(id=1687262996944)",
+        "  • path length: 1",
         "  • parent: None",
-        "  • position: [0. 0. 0.] m",
-        "  • orientation: [0. 0. 0.] deg",
+        "  • path properties: ",
+        "    • position: [0. 0. 0.] m",
+        "    • orientation: [0. 0. 0.] deg",
         "  • centroid: [1. 2. 3.]",
         "  • handedness: left",
         "  • pixel: 75 (3x5x5)",
@@ -752,17 +762,19 @@ def test_describe_with_triangularmesh():
     )
     test = [
         "TriangularMesh(id=1687257413648)",
+        "  • path length: 1",
         "  • parent: None",
-        "  • position: [0. 0. 0.] m",
-        "  • orientation: [0. 0. 0.] deg",
-        "  • magnetization: [     0.              0.         795774.71556455] A/m",
-        "  • polarization: [0. 0. 1.] T",
-        "  • barycenter: [0.         0.         0.46065534]",
-        "  • centroid: [0.         0.         0.46065534]",
-        "  • dipole_moment: [      0.               0.         2122065.90817212]",
-        "  • faces: shape(6, 3)",
+        "  • path properties: ",
+        "    • polarization: [0. 0. 1.] T",
+        "    • magnetization: [     0.         0.    795774.716] A/m",
+        "    • position: [0. 0. 0.] m",
+        "    • orientation: [0. 0. 0.] deg",
+        "    • vertices: [[-1. -1.  0.]  [-1.  1.  0.]  [ 1. -1.  0.]  [ 1.  1.  0.]  [ 0.  0.  2.]] m",
+        "  • volume: 2.67 m³",
+        "  • centroid: [0.    0.    0.461]",
+        "  • dipole_moment: [      0.          0.    2122065.908]",
+        "  • faces: [[4 0 2]  [4 1 0]  [3 4 2]  [3 1 4]  [3 0 1]  [3 2 0]]",
         "  • mesh: shape(6, 3, 3)",
-        "  • meshing: None",
         "  • status_disconnected: False",
         "  • status_disconnected_data: 1 part",
         "  • status_open: False",
@@ -770,11 +782,76 @@ def test_describe_with_triangularmesh():
         "  • status_reoriented: True",
         "  • status_selfintersecting: None",
         "  • status_selfintersecting_data: None",
-        "  • vertices: shape(5, 3)",
-        "  • volume: 2.6666666666666665",
     ]
 
     match_string_up_to_id(test, x.describe(return_string=True))
+
+
+def test_describe_open_current_path():
+    """An open current path has no dipole moment; describe says so instead of
+    raising."""
+    wire = magpy.current.Polyline(vertices=[(0, 0, 0), (1, 0, 0), (1, 1, 0)], current=1)
+    assert "dipole_moment: not defined" in wire.describe(return_string=True)
+
+
+_V4 = np.array([(0.5, 0, 0), (1, 0.2, 0), (0.7, 1, 0.1), (1.2, 1.1, 0.3)])
+
+
+@pytest.mark.parametrize(
+    "obj",
+    [
+        magpy.magnet.Cuboid(dimension=(1, 2, 3), polarization=(0, 0, 1)),
+        magpy.magnet.Cylinder(dimension=(1, 2), polarization=(0, 0, 1)),
+        magpy.magnet.CylinderSegment(
+            dimension=(0.5, 1, 1, 0, 90), polarization=(0, 0, 1)
+        ),
+        magpy.magnet.Sphere(diameter=1, polarization=(0, 0, 1)),
+        magpy.magnet.Tetrahedron(vertices=_V4, polarization=(0, 0, 1)),
+        magpy.magnet.TriangularMesh(
+            vertices=_V4,
+            faces=[(0, 2, 1), (0, 1, 3), (1, 2, 3), (0, 3, 2)],
+            polarization=(0, 0, 1),
+        ),
+        magpy.current.Circle(diameter=1, current=1),
+        magpy.current.Polyline(vertices=_V4, current=1),
+        magpy.current.TriangleStrip(vertices=_V4, current=1),
+        magpy.current.TriangleSheet(
+            vertices=_V4,
+            faces=[(0, 1, 2), (1, 3, 2)],
+            current_densities=[(1, 0, 0), (0, 1, 0)],
+        ),
+        magpy.misc.Triangle(vertices=_V4[:3], polarization=(0, 0, 1)),
+        magpy.misc.Dipole(moment=(0, 0, 1)),
+        magpy.Sensor(pixel=_V4),
+        magpy.Collection(
+            magpy.magnet.Cuboid(dimension=(1, 1, 1), polarization=(0, 0, 1)),
+            magpy.current.Polyline(vertices=_V4, current=1, position=(2, 0, 0)),
+        ),
+    ],
+    ids=lambda obj: type(obj).__name__,
+)
+def test_centroid_turns_with_the_object(obj):
+    """Rotating an object about the origin rotates its centroid with it."""
+    obj.move((0.1, -0.2, 0.3))
+    rot = R.from_rotvec((0.3, -1.1, 0.7))
+    before = obj.centroid
+    obj.rotate(rot, anchor=0)
+    np.testing.assert_allclose(obj.centroid, rot.apply(before), atol=1e-14)
+
+
+@pytest.mark.parametrize(
+    ("obj", "has_alias"),
+    [(magpy.magnet.Tetrahedron(vertices=_V4), True), (magpy.Sensor(), False)],
+    ids=["Tetrahedron", "Sensor"],
+)
+def test_barycenter_only_where_it_was(obj, has_alias):
+    """The deprecated barycenter stays on the classes that had it before version 6,
+    and no other class gains it."""
+    if has_alias:
+        with pytest.warns(DeprecationWarning, match="centroid"):
+            np.testing.assert_allclose(obj.barycenter, obj.centroid)
+    else:
+        assert not hasattr(obj, "barycenter")
 
 
 def test_unset_describe():
@@ -794,3 +871,237 @@ def test_unset_describe():
 
     for o in objs:
         o.describe()
+
+
+def test_orientation_setter_repositions_children_when_prior_orientation_is_none():
+    """When _orientation is None at the time the orientation setter is called
+    (e.g. after an internal reset), children must still be repositioned.
+    The guard `if old_oriQ is not None` was silently skipping the child loop."""
+    child = magpy.magnet.Cuboid(
+        dimension=(0.02, 0.02, 0.02),
+        magnetization=(0, 0, 1e6),
+        position=(0.05, 0, 0),
+    )
+    coll = magpy.Collection(child)
+    object.__setattr__(coll, "_orientation", None)
+    coll.orientation = R.from_euler("z", 90, degrees=True)
+    np.testing.assert_allclose(child.position, [0, 0.05, 0], atol=1e-10)
+
+
+def test_orientation_setter_none_treated_as_identity_rotation():
+    """With _orientation=None treated as identity, the delta applied to children
+    must equal the new orientation (new * identity.inv() = new)."""
+    rot = R.from_euler("z", 45, degrees=True)
+    pos_initial = np.array([0.05, 0.0, 0.0])
+    pos_expected = rot.apply(pos_initial)
+    child = magpy.magnet.Cuboid(
+        dimension=(0.01, 0.01, 0.01),
+        magnetization=(0, 0, 1e6),
+        position=pos_initial,
+    )
+    coll = magpy.Collection(child)
+    object.__setattr__(coll, "_orientation", None)
+    coll.orientation = rot
+    np.testing.assert_allclose(child.position, pos_expected, atol=1e-10)
+
+
+def test_is_initializing_reset_after_failed_init():
+    """_is_initializing must be False after __init__ raises, even via __new__.
+
+    If a setter raises during __init__ (e.g. bad dimension), the try/finally
+    around the _is_initializing block ensures the flag is cleared.  Without it,
+    any subsequent position/orientation setter call on the partially-constructed
+    object would skip eager geometric sync, silently leaving path lengths
+    inconsistent.
+    """
+
+    obj = magpy.magnet.Cuboid.__new__(magpy.magnet.Cuboid)
+    with pytest.raises(MagpylibBadUserInput):
+        obj.__init__(polarization=(0, 0, 1), dimension="bad")
+
+    # Flag must be False regardless of whether __init__ completed
+    assert not getattr(obj, "_is_initializing", True), (
+        "_is_initializing stuck at True after failed __init__"
+    )
+
+    # With the flag cleared, manually bring the object to a valid geometric state
+    # and verify the position setter correctly syncs orientation length.
+    obj._position = np.zeros((1, 3))
+    obj._orientation = R.from_quat([[0, 0, 0, 1]])  # single identity
+    long_path = np.array([(0, 0, i) for i in range(5)], dtype=float)
+    obj.position = long_path
+    assert len(obj._orientation) == 5, (
+        "orientation path not synced to new position length — "
+        "_is_initializing was True when it shouldn't be"
+    )
+
+
+def test_squeeze_path_property_helper():
+    """_squeeze_path_property collapses only the path axis, never feature axes."""
+    f = magpy.magnet.Cuboid._squeeze_path_property
+
+    assert f(None) is None
+
+    # scalar property (p,) -> scalar for len 1, full path otherwise
+    np.testing.assert_array_equal(f(np.array([5.0])), 5.0)
+    np.testing.assert_array_equal(f(np.array([1.0, 2.0, 3.0])), [1.0, 2.0, 3.0])
+
+    # vector property (p, k)
+    assert f(np.zeros((1, 3))).shape == (3,)
+    assert f(np.zeros((4, 3))).shape == (4, 3)
+
+    # feature axis of length 1 must be preserved (the np.squeeze trap)
+    assert f(np.zeros((1, 1, 3))).shape == (1, 3)
+    assert f(np.zeros((2, 1, 3))).shape == (2, 1, 3)
+
+    # scipy Rotation: single unchanged, array len-1 -> single, len>1 -> full
+    single = R.from_rotvec((0.1, 0.2, 0.3))
+    assert f(single) is single
+    arr1 = R.from_rotvec([(0.1, 0.2, 0.3)])
+    assert f(arr1).single
+    arr2 = R.from_rotvec([(0.1, 0.2, 0.3), (0.2, 0.3, 0.4)])
+    assert len(f(arr2)) == 2
+
+
+def test_squeeze_path_property_matches_np_squeeze_on_safe_shapes():
+    """For the shapes the old getters used (feature dims >= 2), the helper must
+    reproduce np.squeeze exactly — proving the consistency refactor is
+    behavior-preserving."""
+    f = magpy.magnet.Cuboid._squeeze_path_property
+    for shape in [(1, 2), (1, 3), (1, 5), (3, 3), (1, 3, 3), (4, 3), (1, 4, 3)]:
+        arr = np.arange(np.prod(shape), dtype=float).reshape(shape)
+        np.testing.assert_array_equal(f(arr), np.squeeze(arr))
+
+
+@pytest.mark.parametrize(
+    ("obj", "attr"),
+    [
+        (
+            magpy.magnet.Cylinder(
+                magnetization=[(0, 0, 1e6), (0, 0, 2e6)],
+                dimension=[(1, 1), (2, 2), (3, 3)],
+            ),
+            "dipole_moment",
+        ),
+        (
+            magpy.magnet.Sphere(
+                magnetization=[(0, 0, 1e6), (0, 0, 2e6)], diameter=[1, 2, 3]
+            ),
+            "dipole_moment",
+        ),
+        (
+            magpy.magnet.CylinderSegment(
+                magnetization=(0, 0, 1e6),
+                dimension=[(1, 2, 1, 0, 90), (1, 2, 1, 0, 180), (1, 2, 1, 0, 270)],
+                position=[(0, 0, 0), (0, 0, 1)],
+            ),
+            "dipole_moment",
+        ),
+        (
+            magpy.magnet.CylinderSegment(
+                magnetization=(0, 0, 1e6),
+                dimension=[(1, 2, 1, 0, 90), (1, 2, 1, 0, 180), (1, 2, 1, 0, 270)],
+                position=[(0, 0, 0), (0, 0, 1)],
+            ),
+            "centroid",
+        ),
+        (
+            magpy.current.Circle(diameter=[1, 2, 3], current=[1, 2]),
+            "dipole_moment",
+        ),
+        (
+            magpy.magnet.Tetrahedron(
+                magnetization=[(0, 0, 1e6), (0, 0, 2e6)],
+                vertices=[(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)],
+                position=[(0, 0, 0), (1, 0, 0), (2, 0, 0)],
+            ),
+            "centroid",
+        ),
+    ],
+)
+def test_computed_getters_mismatched_path_lengths(obj, attr):
+    """Computed getters must edge-pad path properties to a common length.
+
+    Regression test: under lazy storage a property (e.g. magnetization) may be
+    stored with a different path length than the geometry it multiplies. These
+    getters combined the raw arrays and raised a numpy broadcasting error while
+    getB on the same object worked via JIT padding.
+    """
+    result = np.asarray(getattr(obj, attr))  # must not raise
+    assert result.ndim == 2  # (p, 3), padded to the common max path length
+
+
+def test_path_properties_aggregate_over_all_bases():
+    """`_path_properties` must collect from every base, not just the nearest.
+
+    Concrete classes mix several bases (e.g. Cuboid(BaseMagnet, BaseTarget,
+    BaseVolume, BaseDipoleMoment)). An earlier version stopped at the first
+    base declaring `_path_properties`, so a property declared on any later
+    base was silently dropped -- no error, just missing path padding.
+    """
+
+    class PathMixin:
+        _path_properties = ("mixin_prop",)
+
+    class Probe(magpy.magnet.Cuboid, PathMixin):
+        _path_properties = ("own_prop",)
+
+    assert "mixin_prop" in Probe._path_properties
+    assert "own_prop" in Probe._path_properties
+    # inherited ones survive, in MRO order, without duplicates
+    assert Probe._path_properties[:5] == (
+        "position",
+        "orientation",
+        "polarization",
+        "magnetization",
+        "dimension",
+    )
+    assert len(set(Probe._path_properties)) == len(Probe._path_properties)
+
+
+def test_path_properties_unchanged_for_builtin_classes():
+    """Pin the aggregated tuples so the MRO walk cannot reorder them."""
+    assert magpy.magnet.Cuboid._path_properties == (
+        "position",
+        "orientation",
+        "polarization",
+        "magnetization",
+        "dimension",
+    )
+    assert magpy.current.Polyline._path_properties == (
+        "position",
+        "orientation",
+        "current",
+        "vertices",
+    )
+    assert magpy.misc.Dipole._path_properties == ("position", "orientation", "moment")
+
+
+def test_rotate_from_euler_flat_angle_path_single_axis():
+    """a flat (n,) angle path with a one-character seq behaves like (n, 1)"""
+    angs = np.array([15, 30, 45])
+    flat = magpy.Sensor(position=(1, 0, 0)).rotate_from_euler(
+        angs, "z", anchor=0, degrees=True
+    )
+    column = magpy.Sensor(position=(1, 0, 0)).rotate_from_euler(
+        angs[:, np.newaxis], "z", anchor=0, degrees=True
+    )
+    assert flat.position.shape == (4, 3)
+    np.testing.assert_allclose(flat.position, column.position)
+    np.testing.assert_allclose(
+        flat.orientation.as_rotvec(), column.orientation.as_rotvec()
+    )
+    np.testing.assert_allclose(
+        flat.orientation.as_euler("xyz", degrees=True)[:, 2], [0, 15, 30, 45]
+    )
+    # one angle in a list appends a step, and an empty list adds none, as
+    # rotate_from_angax does
+    for angle, steps in (([45], 2), ([], 1)):
+        euler = magpy.Sensor(position=(1, 0, 0)).rotate_from_euler(
+            angle, "z", anchor=0, degrees=True
+        )
+        angax = magpy.Sensor(position=(1, 0, 0)).rotate_from_angax(
+            angle, "z", anchor=0, degrees=True
+        )
+        assert len(np.atleast_2d(euler.position)) == steps
+        np.testing.assert_allclose(euler.position, angax.position, atol=1e-12)

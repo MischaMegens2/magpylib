@@ -1,13 +1,14 @@
-import contextlib
 import os
 import sys
 import tempfile
-from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
 import pytest
 import pyvista as pv
+from vtkmodules.vtkRenderingContext2D import (  # pylint: disable=no-name-in-module
+    vtkContextActor,
+)
 
 import magpylib as magpy
 
@@ -108,7 +109,9 @@ def test_animation_warning():
 @pytest.mark.parametrize("is_notebook_result", [True, False])
 @pytest.mark.parametrize("extension", ["mp4", "gif"])
 @pytest.mark.parametrize("filename", [True, False])
-def test_pyvista_animation(is_notebook_result, extension, filename):
+def test_pyvista_animation(
+    is_notebook_result, extension, filename, tmp_path, monkeypatch
+):
     """Test pyvista animation"""
     # define sensor and source
     pv.OFF_SCREEN = True
@@ -123,23 +126,163 @@ def test_pyvista_animation(is_notebook_result, extension, filename):
     src.move([[0, 0, 0], [0, 0, 1]], start=0)
     objs = [src, sens]
 
+    # temp files land in tmp_path, so what show() leaves behind is listed there
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    output = tmp_path / f"anim.{extension}"
     with (
         patch("magpylib._src.utility.is_notebook", return_value=is_notebook_result),
-        patch("webbrowser.open"),
+        patch("webbrowser.open") as browser_open,
     ):
-        try:
-            temp = Path(tempfile.gettempdir()) / os.urandom(24).hex()
-            temp = temp.with_suffix(f".{extension}")
-            animation_output = temp if filename else extension
+        magpy.show(
+            {"objects": objs, "col": 1, "output": ("Bx", "By", "Bz")},
+            {"objects": objs, "col": 2},
+            backend="pyvista",
+            animation=True,
+            animation_output=output if filename else extension,
+            mp4_quality=1,
+            return_fig=True,
+        )
+    kept = list(tmp_path.iterdir())
+    if is_notebook_result:
+        # embedded: only a file the user named stays
+        assert kept == ([output] if filename else [])
+    else:
+        # the viewer reads the file after show() returns, so it stays
+        assert len(kept) == 1
+        (url,), _ = browser_open.call_args
+        assert url in (kept[0].as_uri(), str(kept[0]))
+
+
+@pytest.mark.parametrize("subplots", [True, False])
+def test_pyvista_animation_plays_live(subplots, tmp_path, monkeypatch):
+    """From a script the window plays the frames on a timer and writes no
+    file. A frame replaces only what the last one drew: the title and the
+    chart stay, and looping stacks no actors and repeats no legend entry.
+    The slider follows the frames and dragging it seeks; the button pauses"""
+    monkeypatch.setattr(pv, "OFF_SCREEN", False)
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    src = magpy.magnet.Cuboid(polarization=(0, 0, 1), dimension=(1, 1, 1))
+    src.move([[0, 0, 0], [0, 0, 1]], start=0)
+    objs = [src, magpy.Sensor()]
+    # two labels at a cap of two: one counted twice would add an overflow entry
+    kwargs = {"backend": "pyvista", "animation": True, "legend_maxitems": 2}
+    kwargs["repeat"] = True
+    with (
+        patch.object(pv.Plotter, "show", autospec=True) as show,
+        patch.object(pv.Plotter, "add_timer_event") as add_timer_event,
+        patch("webbrowser.open") as browser_open,
+    ):
+        if subplots:
             magpy.show(
-                {"objects": objs, "col": 1, "output": ("Bx", "By", "Bz")},
+                {"objects": objs, "col": 1, "output": "Bx"},
                 {"objects": objs, "col": 2},
-                backend="pyvista",
-                animation=True,
-                animation_output=animation_output,
-                mp4_quality=1,
-                return_fig=True,
+                **kwargs,
             )
-        finally:
-            with contextlib.suppress(FileNotFoundError):
-                temp.unlink()
+        else:
+            magpy.show(*objs, title="Title", **kwargs)
+    pl = show.call_args.args[0]
+    play = add_timer_event.call_args.kwargs["callback"]
+    play(0)
+    drawn = [len(r.actors) for r in pl.renderers]
+    entries = pl.renderers[-1].legend.GetNumberOfEntries()
+    for step in range(1, 5):  # two more loops over the two frames
+        play(step)
+    assert [len(r.actors) for r in pl.renderers] == drawn
+    assert pl.renderers[-1].legend.GetNumberOfEntries() == entries
+    if subplots:
+        chart_actors = pl.renderers[0].actors.values()
+        assert any(isinstance(a, vtkContextActor) for a in chart_actors)
+    else:
+        assert "title" in pl.renderer.actors
+    slider = pl.widgets.slider_widgets[0]
+    path_index = slider.GetRepresentation().GetValue
+    assert path_index() == 2  # 1-based, five steps from frame 0
+    slider.InvokeEvent("StartInteractionEvent")
+    slider.GetRepresentation().SetValue(1)
+    slider.InvokeEvent("InteractionEvent")
+    play(5)  # paused while dragging
+    slider.InvokeEvent("EndInteractionEvent")
+    assert path_index() == 1
+    play(6)
+    assert path_index() == 2
+    button = pl.widgets.button_widgets[0]
+    for playing, expected in ((0, 2), (1, 1)):  # pause, then play again
+        button.GetRepresentation().SetState(playing)
+        button.InvokeEvent("StateChangedEvent")
+        play(7)
+        assert path_index() == expected
+    browser_open.assert_not_called()
+    assert not list(tmp_path.iterdir())
+    pl.close()
+
+
+def test_pyvista_warns_on_backend_specific_model3d():
+    """Pyvista does not consume backend-specific models; it must say so.
+
+    Its constructors take points, centers and radii rather than the named
+    coordinate arrays `place_and_orient_model3d` transforms, so such a model
+    used to either crash inside the placement code or be silently dropped by
+    the backend, while the docs advertised support.
+    """
+    obj = magpy.magnet.Cuboid(polarization=(0, 0, 1), dimension=(1, 1, 1))
+    obj.style.model3d.add_trace(
+        backend="pyvista",
+        constructor="Line",
+        kwargs={"pointa": (0, 0, 0), "pointb": (2, 2, 2)},
+    )
+
+    with pytest.warns(UserWarning, match="does not support"):
+        magpy.show(obj, backend="pyvista", return_fig=True)
+
+
+def test_title_reaches_the_pyvista_plotter():
+    """A lone panel gets the title as a corner annotation."""
+    obj = magpy.magnet.Cuboid(
+        polarization=(0, 0, 1), dimension=(1, 1, 1), style_label="L"
+    )
+    with_title = magpy.show(obj, backend="pyvista", return_fig=True, title="MY TITLE")
+    without = magpy.show(obj, backend="pyvista", return_fig=True, title="")
+
+    assert "title" in with_title.renderer.actors
+    assert "title" not in without.renderer.actors
+
+
+def test_pyvista_skips_the_title_on_a_subplot_grid():
+    """pyvista has no figure-level title.
+
+    `add_title` applies to the active subplot, so on a grid it would read as
+    that one panel's title. Skipped rather than placed misleadingly.
+    """
+    obj = magpy.magnet.Cuboid(polarization=(0, 0, 1), dimension=(1, 1, 1))
+    sensor = magpy.Sensor(position=(3, 0, 0))
+
+    plotter = magpy.show(
+        {"objects": [obj, sensor], "row": 1, "col": 1},
+        {"objects": [obj, sensor], "row": 1, "col": 2, "output": "Bx"},
+        backend="pyvista",
+        return_fig=True,
+        title="MY TITLE",
+    )
+    assert "title" not in plotter.renderer.actors
+
+
+def test_face_colors_stay_uint8():
+    """Face colors must reach vtk as unsigned bytes.
+
+    Handed a list of int triples, numpy makes an int64 array and vtk keeps
+    that dtype into `export_vtksz`, where it becomes a BigInt64Array. Webgl
+    viewers cannot read one, so the exported scene breaks at this actor and
+    everything queued behind it - later actors, the orientation marker - is
+    never drawn, while the desktop render looks perfectly fine.
+    """
+    plotter = magpy.show(magpy.Sensor(), backend="pyvista", return_fig=True)
+
+    colored = [
+        actor.mapper.dataset
+        for actor in plotter.renderer.actors.values()
+        if getattr(getattr(actor, "mapper", None), "dataset", None) is not None
+        and "colors" in actor.mapper.dataset.cell_data
+    ]
+    assert colored, "the sensor is drawn with per-face colors"
+    for dataset in colored:
+        assert dataset.cell_data["colors"].dtype == np.uint8

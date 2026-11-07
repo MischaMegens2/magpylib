@@ -19,7 +19,15 @@ except ImportError as missing_module:  # pragma: no cover
     raise ModuleNotFoundError(msg) from missing_module
 
 from magpylib._src.defaults.defaults_utility import linearize_dict
-from magpylib._src.display.traces_utility import get_scene_ranges
+from magpylib._src.display.api import (
+    drawing_properties,
+    forward_options,
+    warn_unused_options,
+)
+from magpylib._src.display.traces_utility import (
+    get_scene_ranges,
+    legend_overflow_label,
+)
 
 SYMBOLS_TO_PLOTLY = {
     ".": "circle",
@@ -238,13 +246,26 @@ def animate_path(
 
 def generic_trace_to_plotly(trace):
     """Transform a generic trace into a plotly trace"""
+    # the cell travels along: `display_plotly` places each trace by it
+    trace = {
+        **drawing_properties(trace),
+        "row": trace.get("row"),
+        "col": trace.get("col"),
+    }
+    if trace["type"] == "mesh3d":
+        # plotly draws a colorbar for any intensity unless told not to
+        trace.setdefault("showscale", False)
+        if trace.get("flatshading"):
+            # without these, plotly's lighting smudges flat faces at their edges
+            trace.setdefault("lighting_facenormalsepsilon", 0)
+            trace.setdefault("lighting_ambient", 0.7)
     if "scatter" in trace["type"]:
-        if trace.get("line_width", None):
+        if trace.get("line_width"):
             trace["line_width"] *= SIZE_FACTORS_TO_PLOTLY["line_width"]
-        dash = trace.get("line_dash", None)
+        dash = trace.get("line_dash")
         if dash is not None:
             trace["line_dash"] = LINESTYLES_TO_PLOTLY.get(dash, "solid")
-        symb = trace.get("marker_symbol", None)
+        symb = trace.get("marker_symbol")
         if symb is not None:
             trace["marker_symbol"] = SYMBOLS_TO_PLOTLY.get(symb, "circle")
         if "marker_size" in trace:
@@ -281,24 +302,68 @@ def process_extra_trace(model):
     return trace3d
 
 
-def display_plotly(
-    data,
-    canvas=None,
-    renderer=None,
-    return_fig=False,
-    canvas_update="auto",
-    max_rows=None,
-    max_cols=None,
-    subplot_specs=None,
-    fig_kwargs=None,
-    show_kwargs=None,
-    **kwargs,  # noqa: ARG001
-):
-    """Display objects and paths graphically using the plotly library."""
+def cap_legend(frames, maxitems):
+    """Keep at most `maxitems` entries in the figure's one legend, the rest
+    summed up in one; 0 keeps none. Decided on the first frame and applied
+    alike to every frame, since an animation's traces line up by index."""
+    entries = [
+        i
+        for i, tr in enumerate(frames[0]["data"])
+        if tr.get("showlegend", True) is not False
+    ]
+    hidden = entries[maxitems:]
+    if not hidden:
+        return
+    for frame in frames:
+        for i in hidden:
+            if i < len(frame["data"]):
+                frame["data"][i] = {**frame["data"][i], "showlegend": False}
+    if maxitems == 0:
+        return
+    # an invisible trace of the hidden ones' kind, in their subplot, on one
+    # of their points: plotly lists only traces with data, and a one-point
+    # line draws nothing, where an empty or NaN one would skew the ranges
+    last = frames[0]["data"][hidden[-1]]
+    is_2d = last.get("type") == "scatter"
+    coords = "xy" if is_2d else "xyz"
+    try:
+        point = {k: [np.ravel(last[k])[0]] for k in coords}
+    except (KeyError, IndexError):  # a trace without coordinates
+        point = {k: [None] for k in coords}
+    overflow = {
+        "type": "scatter" if is_2d else "scatter3d",
+        "mode": "lines",
+        "line_color": "rgba(0,0,0,0)",
+        "hoverinfo": "skip",
+        "name": legend_overflow_label(len(hidden)),
+        "showlegend": True,
+        "row": last.get("row"),
+        "col": last.get("col"),
+        **point,
+    }
+    for frame in frames:
+        frame["data"].append(dict(overflow))
 
-    fig_kwargs = fig_kwargs or {}
-    show_kwargs = show_kwargs or {}
-    show_kwargs = {"renderer": renderer, **show_kwargs}
+
+def _subplot_specs(scene):
+    """plotly's make_subplots spec grid, derived from the scene panels."""
+    return [
+        [
+            {"type": "scene" if scene.panel_kind(r, c) == "scene3d" else "xy"}
+            for c in range(1, scene.n_cols + 1)
+        ]
+        for r in range(1, scene.n_rows + 1)
+    ]
+
+
+def display_plotly(scene):
+    """Display objects and paths graphically using the plotly library."""
+    canvas = scene.canvas
+    canvas_update = scene.canvas_update
+    return_fig = scene.return_fig
+    fig_kwargs = scene.prefixed_options("fig")
+    show_kwargs = scene.prefixed_options("show")
+    renderer = scene.options.get("renderer")
 
     # only update layout if canvas is not provided
     fig = canvas
@@ -309,21 +374,26 @@ def display_plotly(
             show_fig = True
         fig = go.Figure()
 
-    if not (max_rows is None and max_cols is None) and fig._grid_ref is None:  # pylint: disable=protected-access
+    if scene.has_subplots and fig._grid_ref is None:  # pylint: disable=protected-access
         fig = fig.set_subplots(
-            rows=max_rows,
-            cols=max_cols,
-            specs=subplot_specs.tolist(),
+            rows=scene.n_rows,
+            cols=scene.n_cols,
+            specs=_subplot_specs(scene),
         )
 
-    frames = data["frames"]
-    for fr in frames:
-        new_data = [generic_trace_to_plotly(tr) for tr in fr["data"]]
-        for model in fr["extra_backend_traces"]:
+    # Scene frames are immutable, so render into local dicts rather than
+    # mutating the payload -- other code may still be holding it.
+    frames = []
+    for fr in scene.frames:
+        new_data = [generic_trace_to_plotly(tr) for tr in fr.traces]
+        for model in fr.native_traces:
             extra_data = True
             new_data.append(process_extra_trace(model))
-        fr["data"] = new_data
-        fr.pop("extra_backend_traces", None)
+        # the slider steps are keyed by frame name
+        frames.append(
+            {"name": fr.label, "data": new_data, "layout": {"title": scene.title}}
+        )
+    cap_legend(frames, scene.legend_maxitems)
     with fig.batch_update():
         for frame in frames:
             rows_list = []
@@ -333,38 +403,66 @@ def display_plotly(
                 col = tr.pop("col", None)
                 rows_list.append(row)
                 cols_list.append(col)
-        if max_rows is None and max_cols is None:
+        if not scene.has_subplots:
             rows_list = cols_list = None
-        isanimation = len(frames) != 1
+        isanimation = scene.is_animation
         if not isanimation:
             fig.add_traces(frames[0]["data"], rows=rows_list, cols=cols_list)
+            # animate_path does this for the animated branch
+            # only when there is one: setting title=None still materializes an
+            # empty title object in the figure JSON
+            if canvas_update and scene.title:
+                fig.update_layout(title=scene.title)
         else:
-            animation_slider = data["input_kwargs"].get("animation_slider", False)
+            animation_slider = scene.animation.slider
             animate_path(
                 fig,
                 frames,
-                data["path_indices"],
-                data["frame_duration"],
+                scene.animation.path_indices,
+                scene.animation.frame_duration,
                 animation_slider=animation_slider,
                 update_layout=canvas_update,
                 rows=rows_list,
                 cols=cols_list,
             )
         if canvas_update:
-            ranges_rc = data["ranges"]
+            ranges_rc = {
+                (p.row, p.col): p.ranges for p in scene.panels if p.ranges is not None
+            }
             if extra_data:
                 ranges_rc = get_scene_ranges(*frames[0]["data"])
             apply_fig_ranges(
-                fig, ranges_rc, labels_rc=data["labels"], apply2d=isanimation
+                fig,
+                ranges_rc,
+                labels_rc={(p.row, p.col): p.labels for p in scene.panels},
+                apply2d=isanimation,
             )
+            for panel in scene.panels:
+                if panel.kind == "chart2d" and panel.labels:
+                    # pylint: disable=protected-access
+                    cell = (
+                        {"row": panel.row, "col": panel.col}
+                        if fig._grid_ref is not None
+                        else {}
+                    )
+                    fig.update_xaxes(title_text=panel.labels["x"], **cell)
+                    fig.update_yaxes(title_text=panel.labels["y"], **cell)
             fig.update_layout(
                 legend_itemsizing="constant",
                 # legend_groupclick="toggleitem",
             )
-        fig.update(fig_kwargs)
+        forward_options(fig.update, "fig", fig_kwargs)
 
+    unused = [f"show_{k}" for k in show_kwargs]
+    if renderer is not None:
+        unused.append("renderer")
     if return_fig and not show_fig:
+        warn_unused_options(unused, "the figure is returned rather than shown")
         return fig
     if show_fig:
-        fig.show(**show_kwargs)
+        forward_options(fig.show, "show", show_kwargs, defaults={"renderer": renderer})
+    else:
+        warn_unused_options(
+            unused, "the figure is drawn on a given canvas rather than shown"
+        )
     return None

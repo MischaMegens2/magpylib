@@ -174,7 +174,6 @@ def create_frames(frames):
     images = []
     pl = init_plotter()
     for i in range(frames):
-
         # Modify object positions
         mag1.rotate_from_angax(360 / frames, axis="z")
         mag2.rotate_from_angax(-360 / frames, axis="z")
@@ -184,10 +183,10 @@ def create_frames(frames):
         magpy.show(mag1, mag2, canvas=pl, style_legend_show=False)
 
         # Edit figure in Pyvista
-        pl.add_mesh(pv.Line(mag1.barycenter, mag2.barycenter), color="cyan")
+        pl.add_mesh(pv.Line(mag1.centroid, mag2.centroid), color="cyan")
 
         # Screenshot
-        print(f"Writing frame {i+1:3d}/{frames}")
+        print(f"Writing frame {i + 1:3d}/{frames}")
         ss = pl.screenshot(transparent_background=True, return_img=True)
         images.append(ss)
 
@@ -279,8 +278,8 @@ def create_frames(frames):
             margin=dict(l=0, r=0, t=0, b=0),
         )
 
-        # Screenshot (requires kaleido package)
-        print(f"Writing frame {i+1:3d}/{frames}")
+        # Screenshot (requires kaleido>=1, which uses an installed Chrome)
+        print(f"Writing frame {i + 1:3d}/{frames}")
         img = fig.to_image(format="png", width=500, height=500)
         images.append(img)
     return images

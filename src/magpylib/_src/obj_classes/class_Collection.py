@@ -14,12 +14,12 @@ from magpylib._src.defaults.defaults_utility import validate_style_keys
 from magpylib._src.exceptions import MagpylibBadUserInput
 from magpylib._src.fields.field_BH import _getBH_level2
 from magpylib._src.input_checks import check_format_input_obj
-from magpylib._src.obj_classes.class_BaseDisplayRepr import BaseDisplayRepr
 from magpylib._src.obj_classes.class_BaseGeo import BaseGeo
 from magpylib._src.obj_classes.class_BaseProperties import (
     BaseDipoleMoment,
     BaseVolume,
 )
+from magpylib._src.obj_classes.class_BaseTransform import pad_path_property
 from magpylib._src.utility import format_obj_input, rec_obj_remover
 
 
@@ -124,14 +124,12 @@ def _collection_tree_generator(
             )
 
 
-class BaseCollection(BaseDisplayRepr):
+class BaseCollection:
     """Collection base class without BaseGeo properties"""
 
     get_trace = None
 
     def __init__(self, *children, override_parent=False):
-        BaseDisplayRepr.__init__(self)
-
         self._children = []
         self._sources = []
         self._sensors = []
@@ -383,7 +381,7 @@ class BaseCollection(BaseDisplayRepr):
     def _update_src_and_sens(self):
         """updates sources, sensors and collections attributes from children"""
         # pylint: disable=protected-access
-        from magpylib._src.obj_classes.class_BaseExcitations import BaseSource  # noqa: I001, PLC0415
+        from magpylib._src.obj_classes.class_BaseExcitations import BaseSource  # noqa: PLC0415
         from magpylib._src.obj_classes.class_Sensor import Sensor  # noqa: PLC0415
 
         self._sources = [obj for obj in self._children if isinstance(obj, BaseSource)]
@@ -928,7 +926,7 @@ class Collection(BaseGeo, BaseCollection, BaseVolume, BaseDipoleMoment):
         Ordered list of children in the collection top level.
     children_all : list
         Read-only. Ordered list of children in the collection including nested collections.
-    parent : Collection | None
+    parent : None | Collection
         Parent collection of the object.
     sensors : list
         Ordered list of sensor objects in the collection top level.
@@ -943,16 +941,18 @@ class Collection(BaseGeo, BaseCollection, BaseVolume, BaseDipoleMoment):
     collections_all : list
         Read-only. Ordered list of collection objects in the collection including nested collections.
     centroid : ndarray, shape (3,) or (p, 3)
-        Read-only. Collection centroid in units (m) computed as the volume-weighted average of all
-        child centroids. Can be a path.
-    volume : float
+        Read-only. Collection centroid in units (m): the volume-weighted average of its
+        magnets' centroids, nested Collections counted once. Without volume, such as a
+        coil of current loops, the mean of its members' centroids; without members, its
+        position.
+    volume : float | ndarray, shape (p,)
         Read-only. Total Collection volume (m³) of all magnets. Overlapping objects may lead
         to double counting.
-    dipole_moment : ndarray, shape (3,)
+    dipole_moment : ndarray, shape (3,) or (p, 3)
         Read-only. Total Collection dipole moment (A·m²) computed from the sum of all child
         dipole moments.
-    style : dict
-        Style dictionary defining the visual properties of the collection objects.
+    style : BaseStyle
+        Object style. See BaseStyle for details.
 
     Examples
     --------
@@ -1009,6 +1009,8 @@ class Collection(BaseGeo, BaseCollection, BaseVolume, BaseDipoleMoment):
     [ 2.329e-04 -9.317e-05 -3.445e-10]
     """
 
+    get_trace = None  # Collections don't have their own trace
+
     def __init__(
         self,
         *children,
@@ -1027,33 +1029,106 @@ class Collection(BaseGeo, BaseCollection, BaseVolume, BaseDipoleMoment):
         )
         BaseCollection.__init__(self, *children, override_parent=override_parent)
 
-    # Abstract methods implementation
-    def _get_volume(self):
-        """Return volume of all objects (m³)."""
-        return sum(getattr(child, "volume", 0.0) for child in self.children_all)
+    def describe(self, format="type+label+id", max_elems=10, return_string=False):
+        # pylint: disable=arguments-differ
+        """Return or print a tree view of the collection.
 
-    def _get_centroid(self):
-        """Return centroid of collection weighted by children volumes (m)."""
-        total_volume = 0.0
-        weighted_centroid = np.array([0.0, 0.0, 0.0])
-
-        for child in self.children_all:
-            child_volume = getattr(child, "volume", 0.0)
-            if child_volume > 0:
-                child_centroid = child.centroid
-                weighted_centroid += child_centroid * child_volume
-                total_volume += child_volume
-
-        if total_volume > 0:
-            return weighted_centroid / total_volume
-        return self.position
-
-    def _get_dipole_moment(self):
-        """Return magnetic dipole moment of object (A·m²)."""
-        return np.sum(
-            [
-                getattr(child, "dipole_moment", np.zeros(3))
-                for child in self.children_all
-            ],
-            axis=0,
+        This override ensures that Collection instances use the collection-specific
+        tree formatter instead of the generic BaseGeo property description.
+        """
+        return BaseCollection.describe(
+            self,
+            format=format,
+            max_elems=max_elems,
+            return_string=return_string,
         )
+
+    def _repr_html_(self):
+        """Rich HTML representation using the collection tree formatter."""
+        return BaseCollection._repr_html_(self)
+
+    # Abstract methods implementation
+    def _members(self):
+        """Top-level sources and Collections; what the body is made of."""
+        return [*self.sources, *self.collections]
+
+    def _volume_centroid_paths(self):
+        """Return the volume path (p,), the centroid path (p, 3) and the number of
+        sources of the body.
+
+        Members are walked once, a nested Collection through this same method; a
+        nested Collection without sources contributes nothing. The centroid is
+        volume-weighted over the members that have volume; on path steps where
+        none has, it is the mean of the sources' centroids; without sources, the
+        Collection's own position. Shorter paths are padded with their last
+        value, like ``getB`` does.
+        """
+        volumes = []
+        centroids = []
+        counts = []
+        for member in self._members():
+            if isinstance(member, Collection):
+                volume, centroid, count = member._volume_centroid_paths()
+                if count == 0:
+                    continue
+            else:
+                volume = np.atleast_1d(
+                    np.asarray(getattr(member, "volume", 0.0), float)
+                )
+                centroid = np.atleast_2d(member._centroid)
+                count = 1
+            volumes.append(volume)
+            centroids.append(centroid)
+            counts.append(count)
+        if not counts:
+            return np.zeros(1), np.array(self._position, float), 0
+
+        n_vol = max(len(v) for v in volumes)
+        total = sum(pad_path_property(v, n_vol) for v in volumes)  # (n_vol,)
+        n_path = max(n_vol, *[len(c) for c in centroids])
+        volumes = [pad_path_property(v, n_path) for v in volumes]
+        centroids = [pad_path_property(c, n_path) for c in centroids]
+        has_volume = pad_path_property(total, n_path) > 0  # (n_path,)
+        weighted = sum(
+            c * v[:, np.newaxis] for c, v in zip(centroids, volumes, strict=True)
+        )
+        weighted = (
+            weighted
+            / np.where(has_volume, pad_path_property(total, n_path), 1)[:, np.newaxis]
+        )
+        mean = sum(c * n for c, n in zip(centroids, counts, strict=True)) / sum(counts)
+        centroid = np.where(has_volume[:, np.newaxis], weighted, mean)
+        return total, centroid, sum(counts)
+
+    def _get_volume(self):
+        """Return volume of all magnets (m³); a nested Collection counts once."""
+        volume, _, _ = self._volume_centroid_paths()
+        return float(volume[0]) if len(volume) == 1 else volume
+
+    def _get_centroid(self, squeeze=True):
+        """Return the centroid of the Collection (m), see ``_volume_centroid_paths``."""
+        _, centroid, _ = self._volume_centroid_paths()
+        return np.squeeze(centroid) if squeeze else centroid
+
+    def _get_dipole_moment(self, squeeze=True):
+        """Return magnetic dipole moment of the body (A·m²) in the Collection's own
+        frame, as a magnet's is in its own; a nested Collection counts once,
+        members' paths are padded to the longest.
+
+        Each member reports its moment in its own frame, so it is turned by the
+        member's orientation into the global frame before the sum, and the sum
+        by the Collection's orientation into the Collection's frame."""
+        moments = []
+        for member in self._members():
+            if not hasattr(member, "_get_dipole_moment"):
+                continue
+            own = np.atleast_2d(member._get_dipole_moment(squeeze=False))
+            n = max(len(own), len(member._orientation))
+            orientation = pad_path_property(member._orientation, n)
+            moments.append(orientation.apply(pad_path_property(own, n)))
+        if not moments:
+            return np.zeros(3) if squeeze else np.zeros((1, 3))
+        n_path = max(len(self._orientation), *[len(m) for m in moments])
+        moment = sum(pad_path_property(m, n_path) for m in moments)
+        moment = pad_path_property(self._orientation, n_path).inv().apply(moment)
+        return np.squeeze(moment) if squeeze else moment

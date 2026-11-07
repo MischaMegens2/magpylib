@@ -39,15 +39,15 @@ class CustomSource(BaseSource):
         Same as constructor parameter ``orientation``.
     field_func : None | callable
         Same as constructor parameter ``field_func``.
-    parent : Collection | None
+    parent : None | Collection
         Parent collection of the object.
-    style : dict
-        Style dictionary defining visual properties.
+    style : BaseStyle
+        Object style. See BaseStyle for details.
 
     Examples
     --------
-    With version 4, ``CustomSource`` objects enable users to define their own source
-    objects and embed them in the Magpylib object-oriented interface. In this example
+    ``CustomSource`` objects enable users to define their own source objects and
+    embed them in the Magpylib object-oriented interface. In this example
     we create a source that generates a constant field and evaluate the field at the
     observer position ``(0.01, 0.01, 0.01)`` in units (m):
 
@@ -71,8 +71,9 @@ class CustomSource(BaseSource):
         style=None,
         **kwargs,
     ):
-        # init inheritance
-        super().__init__(position, orientation, field_func, style, **kwargs)
+        super().__init__(
+            position, orientation, field_func=field_func, style=style, **kwargs
+        )
 
     # Methods
     def _get_centroid(self, squeeze=True):

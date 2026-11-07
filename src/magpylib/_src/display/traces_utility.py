@@ -4,13 +4,10 @@
 # pylint: disable=too-many-branches
 # pylint: disable=too-many-positional-arguments
 
-from collections import defaultdict
 from functools import lru_cache
 from itertools import chain, cycle
 
 import numpy as np
-from matplotlib.colors import rgb2hex
-from plotly.colors import sample_colorscale
 from scipy.spatial.transform import Rotation as RotScipy
 
 from magpylib._src.defaults.defaults_classes import default_settings
@@ -31,8 +28,28 @@ DEFAULT_ROW_COL_PARAMS = {
     "pixel_agg": "mean",
     "in_out": "auto",
     "zoom": 0,
+    # placeholder: `units_length` is user-configurable at runtime, so its
+    # effective value is resolved per call by `row_col_defaults()`. This dict
+    # is still the authority on *which* keys are row/col parameters.
     "units_length": "auto",
 }
+
+
+def row_col_defaults():
+    """Default row/col parameters, with the runtime-configurable ones resolved.
+
+    Use this over `DEFAULT_ROW_COL_PARAMS` wherever the *values* are needed.
+    """
+    return {
+        **DEFAULT_ROW_COL_PARAMS,
+        "units_length": default_settings.display.units.length,
+    }
+
+
+def legend_overflow_label(hidden):
+    """Text of the one entry standing for the `hidden` legend entries past
+    `legend_maxitems`, shared so every backend words it the same."""
+    return f"… and {hidden} more"
 
 
 def get_legend_label(obj, style=None, suffix=True):
@@ -81,14 +98,17 @@ def place_and_orient_model3d(
         )
         # sometimes traces come as (n, m, 3) shape
         vert_shape = vertices.shape
-        vertices = np.reshape(vertices.astype(float), (3, -1))
-
-        vertices = vertices.T
+        vertices = vertices.astype(float, copy=False).reshape(3, -1).T
 
         if orientation is not None:
             vertices = orientation.apply(vertices)
-        new_vertices = (vertices * scale + position).T * length_factor
-        new_vertices = np.reshape(new_vertices, vert_shape)
+        # multiplying by 1 changes no float: skip those passes
+        if scale != 1:
+            vertices = vertices * scale
+        new_vertices = (vertices + position).T
+        if length_factor != 1:
+            new_vertices = new_vertices * length_factor
+        new_vertices = new_vertices.reshape(vert_shape)
         for i, k in enumerate("xyz"):
             key = coordsargs[k]
             if useargs:
@@ -96,6 +116,13 @@ def place_and_orient_model3d(
                 new_model_args[ind] = new_vertices[i]
             else:
                 new_model_dict[key] = new_vertices[i]
+        is_field = (
+            model_kwargs.get("type") == "pixels" and model_kwargs["u"] is not None
+        )
+        if orientation is not None and is_field:
+            # the field the pixels read turns with them, and does not move
+            uvw = np.column_stack([model_kwargs[k] for k in "uvw"])
+            new_model_dict.update(zip("uvw", orientation.apply(uvw).T, strict=True))
         new_model_kwargs = {**model_kwargs, **new_model_dict, **kwargs}
 
     out = (new_model_kwargs,)
@@ -108,7 +135,10 @@ def place_and_orient_model3d(
 
 def get_vertices_from_model(model_kwargs, model_args=None, coordsargs=None):
     """get vertices from model kwargs and args"""
-    if model_args and coordsargs is None:  # Matplotlib default
+    model_kwargs = model_kwargs or {}
+    if (
+        model_args and coordsargs is None and not all(k in model_kwargs for k in "xyz")
+    ):  # Matplotlib default, unless the kwargs name the coordinates
         coordsargs = {"x": "args[0]", "y": "args[1]", "z": "args[2]"}
     vertices = []
     if coordsargs is None:
@@ -356,6 +386,30 @@ def path_frames_to_indices(frames, path_len):
     return inds
 
 
+def _get_prop(prop, ind):
+    """Read a path property at index ``ind`` (lazy access).
+
+    Returns the single stored value for any index when the property is not
+    path-varying (length 1), so minimally-stored properties never need to be
+    materialized to the full path length for display.
+    """
+    if prop is None:
+        return None
+
+    # Handle scipy Rotation
+    if hasattr(prop, "single"):
+        if prop.single:
+            return prop
+        if len(prop) == 1:
+            return prop[0]
+        return prop[ind if ind < len(prop) else -1]
+
+    # Handle other array-likes (numpy)
+    if len(prop) == 1:
+        return prop[0]
+    return prop[ind if ind < len(prop) else -1]
+
+
 def get_objects_props_by_row_col(*objs, colorsequence, style_kwargs):
     """Return flat dict with objs as keys object properties as values.
     Properties include: row_cols, style, legendgroup, legendtext"""
@@ -382,11 +436,26 @@ def get_objects_props_by_row_col(*objs, colorsequence, style_kwargs):
         style_kwargs=style_kwargs,
         colorsequence=colorsequence,
     )
+    # whether each object, children included, is listed in a legend: the
+    # parent collection's setting where there is one, else the object's own,
+    # resolved with defaults and show() arguments -- the rule 3D traces follow.
+    # 2D panels hold only the objects as given, so their children's settings
+    # would be lost without this.
+    legend_show = {
+        obj: props["style"].legend.show
+        if props["showlegend"] is None
+        else props["showlegend"]
+        for obj, props in flat_sub_objs.items()
+    }
     for obj, rc_params_list in rc_params_by_obj.items():
         for rc_params in rc_params_list:
             rc = rc_params["row"], rc_params["col"]
             if rc not in flat_objs_rc:
-                flat_objs_rc[rc] = {"objects": {}, "rc_params": rc_params}
+                flat_objs_rc[rc] = {
+                    "objects": {},
+                    "rc_params": rc_params,
+                    "legend_show": legend_show,
+                }
             if rc_params["output"] == "model3d" or obj in objs_by_rc[rc]:
                 flat_objs_rc[rc]["objects"][obj] = flat_sub_objs[obj]
     return flat_objs_rc
@@ -406,13 +475,19 @@ def get_flatten_objects_properties_recursive(
     if color_cycle is None:
         color_cycle = cycle(colorsequence)
     flat_objs = {}
-    for subobj in dict.fromkeys(obj_list_semi_flat):
+    for index, subobj in enumerate(dict.fromkeys(obj_list_semi_flat)):
         isCollection = getattr(subobj, "children", None) is not None
         style_kwargs = {} if style_kwargs is None else style_kwargs
         style = get_style(subobj, default_settings, **style_kwargs)
         if style.label is None:
             style.label = str(type(subobj).__name__)
-        legendgroup = f"{subobj}" if parent_legendgroup is None else parent_legendgroup
+        # the outermost object's class and position among those shown: unique
+        # in the figure and the same on every run, unlike a repr with its id
+        legendgroup = (
+            f"{type(subobj).__name__}#{index}"
+            if parent_legendgroup is None
+            else parent_legendgroup
+        )
         label = (
             get_legend_label(subobj, style=style)
             if parent_label is None
@@ -513,31 +588,17 @@ def merge_scatter3d(*traces):
     return merged_trace
 
 
-def aggregate_by_trace_type(traces):
-    """aggregate traces by type"""
-    result_dict = defaultdict(list)
-    for item in traces:
-        result_dict[item["type"]].append(item)
-    yield from result_dict.items()
+def _reconcile_object_id(merged, sources):
+    """Keep `object_id` only when every merged trace came from one object.
 
-
-def merge_traces(*traces):
-    """Merges a list of plotly 3d-traces. Supported trace types are `mesh3d` and `scatter3d`.
-    All traces have be of the same type when merging. Keys are taken from the first object, other
-    keys from further objects are ignored.
+    Unlisted keys are otherwise taken from `sources[0]`, which would silently
+    attach the *first* object's id to a trace spanning several -- worse than no
+    id at all. Merging an object's own sub-traces keeps the id, which is what
+    makes the identity survive the four intra-object merges.
     """
-    new_traces = []
-    for ttype, tlist in aggregate_by_trace_type(traces):
-        if len(tlist) > 1:
-            if ttype == "mesh3d":
-                new_traces.append(merge_mesh3d(*tlist))
-            elif ttype == "scatter3d":
-                new_traces.append(merge_scatter3d(*tlist))
-            else:  # pragma: no cover
-                new_traces.extend(tlist)
-        elif len(tlist) == 1:
-            new_traces.append(tlist[0])
-    return new_traces
+    ids = {tr.get("object_id") for tr in sources}
+    merged["object_id"] = ids.pop() if len(ids) == 1 else None
+    return merged
 
 
 def getIntensity(vertices, axis) -> np.ndarray:
@@ -557,13 +618,15 @@ def getIntensity(vertices, axis) -> np.ndarray:
     Intensity values: ndarray, shape (n,)
     """
     p = np.array(vertices).T
-    pos = np.mean(p, axis=1)
-    m = np.array(axis)
-    intensity = (p[0] - pos[0]) * m[0] + (p[1] - pos[1]) * m[1] + (p[2] - pos[2]) * m[2]
+    # what np.mean and np.ptp compute, without their dispatch overhead
+    pos = p.sum(axis=1) / p.shape[1]
+    d = (p - pos[:, None]) * np.array(axis)[:, None]
+    intensity = d[0] + d[1] + d[2]
     # normalize to interval [0, 1] (necessary for when merging mesh3d traces)
-    ptp = np.ptp(intensity)
+    lo = intensity.min()
+    ptp = intensity.max() - lo
     ptp = ptp if ptp != 0 else 1
-    return (intensity - np.min(intensity)) / ptp
+    return (intensity - lo) / ptp
 
 
 @lru_cache(maxsize=32)
@@ -637,7 +700,7 @@ def get_scene_ranges(*traces, zoom=0) -> np.ndarray:
             tr = dict(zip("xyz", verts, strict=False))
             rc = kwex["row"], kwex["col"]
         if rc not in ranges_rc:
-            ranges_rc[rc] = {k: [] for k in "xyz"}
+            ranges_rc[rc] = []  # each trace's min and max, as rows
             tr_dim_count[rc] = {"2D": 0, "3D": 0}
         if "z" not in tr:  # only extend range for 3d traces
             tr_dim_count[rc]["2D"] += 1
@@ -651,19 +714,24 @@ def get_scene_ranges(*traces, zoom=0) -> np.ndarray:
                 # for 2d meshes, nothing special needed
                 pass
             pts = pts.reshape(-1, 3)
+            if tr.get("type") == "pixels":
+                # as far as drawn: a symbol along the field its size from its
+                # center, a cube half of it
+                reach = np.asarray(tr["marker_size"], dtype=float) / 2
+                if tr["field_symbol"] is not None:
+                    reach[np.any([tr["u"], tr["v"], tr["w"]], axis=0)] *= 2
+                pts = np.concatenate([pts - reach[:, None], pts + reach[:, None]])
             if pts.size != 0:
-                min_max = np.nanmin(pts, axis=0), np.nanmax(pts, axis=0)
-                for v, min_, max_ in zip(
-                    ranges_rc[rc].values(), *min_max, strict=False
-                ):
-                    v.extend([min_, max_])
+                ranges_rc[rc].append(np.nanmin(pts, axis=0))
+                ranges_rc[rc].append(np.nanmax(pts, axis=0))
     for rc, ranges_item in ranges_rc.items():
         ranges = ranges_item
         if tr_dim_count[rc]["3D"]:
             zo = zoom[rc] if isinstance(zoom, dict) else zoom
             # SET 3D PLOT BOUNDARIES
-            # collect min/max from all elements
-            r = np.array([[np.nanmin(v), np.nanmax(v)] for v in ranges.values()])
+            # collect min/max from all elements, axis by axis
+            columns = np.reshape(ranges, (-1, 3)).T
+            r = np.array([[np.nanmin(v), np.nanmax(v)] for v in columns])
             size = np.diff(r, axis=1)
             m = size.max() / 2
             m = 1 if m == 0 else m
@@ -694,44 +762,64 @@ def rescale_traces(traces, factors):
             tr["args"] = args
         if "z" in tr:  # rescale only 3d traces
             rc = tr.get("row", 1), tr.get("col", 1)
-            traces[ind] = place_and_orient_model3d(tr, length_factor=factors[rc])
+            placed = place_and_orient_model3d(tr, length_factor=factors[rc])
+            # one type whatever the user typed and whatever the unit: integer
+            # positions stayed integer arrays at a factor of 1, and a user
+            # model's face indices arrived as the lists it was given
+            for k in "xyz":
+                placed[k] = np.asarray(placed[k], dtype=float)
+            if placed.get("type") == "mesh3d":
+                for k in "ijk":
+                    if k in placed:
+                        placed[k] = np.asarray(placed[k], dtype=int)
+            if placed.get("type") == "pixels":
+                placed["marker_size"] = placed["marker_size"] * factors[rc]
+            traces[ind] = placed
     return traces
+
+
+_MERGERS = {"mesh3d": merge_mesh3d, "scatter3d": merge_scatter3d}
+_GROUP_KEYS = ("legendgroup", "opacity", "row", "col", "color")
+_GROUP_KEYS_BY_TYPE = {
+    "mesh3d": ("colorscale", "facecolor"),
+    "scatter3d": (
+        "marker",
+        "line_dash",
+        "line_color",
+        "line_width",
+        "marker_color",
+        "marker_symbol",
+        "marker_size",
+        "mode",
+    ),
+}
 
 
 def group_traces(*traces):
     """Group and merge mesh traces with similar properties. This drastically improves
     browser rendering performance when displaying a lot of mesh3d objects."""
-    mesh_groups = {}
-    common_keys = ["legendgroup", "opacity", "row", "col", "color"]
-    spec_keys = {
-        "mesh3d": ["colorscale", "facecolor"],
-        "scatter3d": [
-            "marker",
-            "line_dash",
-            "line_color",
-            "line_width",
-            "marker_color",
-            "marker_symbol",
-            "marker_size",
-            "mode",
-        ],
-    }
-    for tr_item in traces:
-        tr = linearize_dict(tr_item, separator="_")
+    traces = [linearize_dict(tr, separator="_") for tr in traces]
+    if len(traces) < 2:
+        return traces
+    groups = {}
+    for tr in traces:
         tr_typ = tr["type"]
-        gr = [tr_typ]
-        for k in [*common_keys, *spec_keys.get(tr_typ, [])]:
+        key = [tr_typ]
+        for k in (*_GROUP_KEYS, *_GROUP_KEYS_BY_TYPE.get(tr_typ, ())):
             v = tr.get(k, None)
             # colorscales cannot merged in mesh3d (yet)
             if k != "colorscale" and is_array_like(v):
                 v = "array"
-            gr.append(str(v))
-        gr = hash(tuple(gr))
-        mesh_groups.setdefault(gr, []).append(tr)
-    traces = []
-    for group in mesh_groups.values():
-        traces.extend(merge_traces(*group))
-    return traces
+            key.append(str(v))
+        groups.setdefault(tuple(key), []).append(tr)
+    merged = []
+    for (tr_typ, *_), group in groups.items():
+        merge = _MERGERS.get(tr_typ) if len(group) > 1 else None
+        if merge is None:
+            merged.extend(group)
+        else:
+            merged.append(_reconcile_object_id(merge(*group), group))
+    return merged
 
 
 def subdivide_mesh_by_facecolor(trace):
@@ -759,7 +847,7 @@ def subdivide_mesh_by_facecolor(trace):
 
 def process_show_input_objs(objs, **kwargs):
     """Extract max_rows and max_cols from obj list of dicts"""
-    defaults = DEFAULT_ROW_COL_PARAMS.copy()
+    defaults = row_col_defaults()
     identifiers = ("row", "col")
     unique_fields = tuple(k for k in defaults if k not in identifiers)
     sources_and_sensors_only = []
@@ -788,28 +876,17 @@ def process_show_input_objs(objs, **kwargs):
         unique_fields=unique_fields,
     )
 
-    # create subplot specs grid
+    # resolve the grid extent; the per-cell 2D/3D kind now lives on Scene.panels
     row_cols = [*row_col_dict]
     max_rows, max_cols = np.max(row_cols, axis=0).astype(int) if row_cols else (1, 1)
-    # convert to int to avoid np.int32 type conflicting with plolty subplot specs
     max_rows, max_cols = int(max_rows), int(max_cols)
-    specs = np.array([[{"type": "scene"}] * max_cols] * max_rows)
-    for rc, obj in row_col_dict.items():
-        if obj["output"] != "model3d":
-            specs[rc[0] - 1, rc[1] - 1] = {"type": "xy"}
     if max_rows == 1 and max_cols == 1:
         max_rows = max_cols = None
 
     for obj in row_col_dict.values():
         check_input_zoom(obj.get("zoom", None))
 
-    return (
-        list(row_col_dict.values()),
-        list(dict.fromkeys(sources_and_sensors_only)),
-        max_rows,
-        max_cols,
-        specs,
-    )
+    return list(row_col_dict.values()), max_rows, max_cols
 
 
 def triangles_area(triangles):
@@ -929,30 +1006,6 @@ def create_null_dim_trace(color=None, **kwargs):
     return {**trace, **kwargs}
 
 
-def get_hexcolors_from_colormap(
-    values,
-    colormap,
-    cmin=None,
-    cmax=None,
-    nan_color="#b2beb5",
-):
-    """Convert numerical values to hexadecimal colors based on a color scale.
-    Invalid value in the array a converted to the specified `nan_color`."""
-    values = np.array(values)
-    nan_mask = np.isnan(values)
-    valid = values[~nan_mask]
-    cmin = np.nanmin(valid) if cmin is None else cmin
-    cmax = np.nanmax(valid) if cmax is None else cmax
-    ptp = cmax - cmin
-    values = (values - cmin) / ptp if ptp != 0 else values * 0 + 0.5
-    rgb_colors = sample_colorscale(colormap, values[~nan_mask], colortype=None)
-    hex_colors = [rgb2hex(rgb) for rgb in rgb_colors]
-    out = np.array([""] * len(values), dtype="<U10")
-    out[nan_mask] = nan_color
-    out[~nan_mask] = hex_colors
-    return out
-
-
 def split_input_arrays(*input_arrays, ordered=True):
     """splits input_arrays into chunks of same values.
     Use case: Unlike plotly, matplotlib and pyvista cannot display line plots with an array of
@@ -1006,3 +1059,27 @@ def get_trace_kw(trace, arg, *, none_replace=None):
     if res is None:
         return none_replace
     return res
+
+
+#: The spelling of each allowed line style in the trace dialect: the long
+#: names, so that a backend maps six values rather than every spelling the
+#: style accepts, a dash tuple among them.
+LINE_DASHES = {
+    "solid": "solid",
+    "-": "solid",
+    "dashed": "dashed",
+    "--": "dashed",
+    "dotted": "dotted",
+    ".": "dotted",
+    ":": "dotted",
+    (0, (1, 1)): "dotted",
+    "dashdot": "dashdot",
+    "-.": "dashdot",
+    "loosely dotted": "loosely dotted",
+    "loosely dashdotted": "loosely dashdotted",
+}
+
+
+def line_dash(style):
+    """The dialect's spelling of the line style `style`; None stays None."""
+    return None if style is None else LINE_DASHES.get(style, style)
